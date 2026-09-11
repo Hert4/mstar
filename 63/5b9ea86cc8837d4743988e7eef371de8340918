@@ -1,0 +1,41 @@
+configs/omnivoice.yaml
+  s_6a1513f46bf006::t_333d854e6b2cdd 1-5
+mstar/api_server/openai/adapters.py
+  s_6a1513f46bf006::t_90e50e17eb728b 328-384,514
+mstar/model/omnivoice/components/backbone.py
+  s_6a1513f46bf006::t_3db0282eba5b07 1-247
+mstar/model/omnivoice/components/codec.py
+  s_6a1513f46bf006::t_c5c16ca474f227 1-139
+mstar/model/omnivoice/components/text.py
+  s_6a1513f46bf006::t_7f393c65c6a42e 1-135
+mstar/model/omnivoice/components/unmask.py
+  s_6a1513f46bf006::t_0d03ae91c5188a 1-172
+mstar/model/omnivoice/config.py
+  s_6a1513f46bf006::t_207cd27c537ed4 1-129
+mstar/model/omnivoice/omnivoice_model.py
+  s_6a1513f46bf006::t_033876bc170ec2 1-672
+mstar/model/omnivoice/submodules.py
+  s_6a1513f46bf006::t_95ad3cc8e8b2a6 1-438
+mstar/model/registry.py
+  s_6a1513f46bf006::t_a4b5816308ff9e 11,38-41
+pyproject.toml
+  s_6a1513f46bf006::t_cbd7a1c02c9f1e 50-53
+test/omnivoice/test_parity.py
+  s_6a1513f46bf006::t_4bd8d53c14b609 1-363
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "635b9ea86cc8837d4743988e7eef371de8340918",
+  "prompts": {},
+  "sessions": {
+    "s_6a1513f46bf006": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ac6e8ce3-5474-420e-bfcf-bf8da9e52dfa",
+        "model": "claude-opus-5"
+      },
+      "human_author": "tmduc3 <tmduc3@rd.misa.com.vn>"
+    }
+  }
+}
