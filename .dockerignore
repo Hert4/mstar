@@ -1,0 +1,5 @@
+.git
+**/__pycache__
+**/*.pyc
+docs/_build
+rust/*/target

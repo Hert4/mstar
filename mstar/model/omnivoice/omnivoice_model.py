@@ -19,6 +19,7 @@ same batch.  A fixed-pipeline port has to pick one value for the whole server.
 """
 
 import logging
+import os
 
 import numpy as np
 import torch
@@ -73,7 +74,12 @@ class OmniVoiceModel(Model):
         skip_weight_loading: bool = False,
         **kwargs,
     ):
-        self.model_path_hf = model_path_hf
+        # A deployment points at a mounted checkpoint rather than the Hub: the
+        # registry entry names the public k2-fsa weights, but MISA serves its
+        # own fine-tune from object storage, and the two are the same
+        # architecture. _refresh_checkpoint_defaults is what catches a
+        # fine-tune that actually diverged.
+        self.model_path_hf = os.environ.get("MSTAR_OMNIVOICE_MODEL_PATH") or model_path_hf
         self.cache_dir = cache_dir
         self.config = OmniVoiceConfig()
         self.skip_weight_loading = skip_weight_loading
