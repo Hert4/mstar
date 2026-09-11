@@ -141,6 +141,14 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
     """
 
     disable_torch_compile = True
+    # The fused flashinfer kernels this path runs on (RMSNorm, silu_and_mul,
+    # ragged attention) require every tensor in a call to share one dtype --
+    # unlike ATen, which would quietly promote. Under the engine's autocast the
+    # activations arrive at a different dtype from the weights and the fused
+    # RMSNorm rejects the call outright:
+    #   Mismatched Tensor on argument #1 ... expected dtype=float32
+    # So numerics here are governed by the load dtype, not by the engine.
+    disable_autocast = True
 
     def __init__(self, backbone: OmniVoiceBackbone, config: OmniVoiceConfig):
         super().__init__()

@@ -534,6 +534,15 @@ class OmniVoiceModel(Model):
             request_done=request_done,
         )
 
+    def get_autocast_dtype(self):
+        """No engine autocast: the fused kernels need one dtype throughout.
+
+        Returning None disables both autocast and the engine's blanket cast, so
+        numerics follow the load dtype -- the same call wan22 makes to keep its
+        numerics equal to the reference pipeline.
+        """
+        return None
+
     def get_output_sample_rate(self, modality: str = "audio") -> int:
         return self.config.sample_rate
 
@@ -612,7 +621,29 @@ class OmniVoiceModel(Model):
                 self._codec = reference.audio_tokenizer.to(device)
                 self.config.frame_rate = float(self._codec.config.frame_rate)
                 self.config.sample_rate = int(self._codec.config.sample_rate)
+            # Cast explicitly and verify. `dtype=` on from_pretrained does not
+            # always reach every module, and a checkpoint whose config says
+            # float32 can come back float32 -- which is exactly how the fused
+            # RMSNorm ended up with float32 weights under float16 activations.
+            # Cast the BACKBONE only. The reference never casts its codec:
+            # from_pretrained(dtype=...) touches modules built during loading,
+            # and audio_tokenizer is assigned afterwards, so upstream runs a
+            # float32 codec against a float16 backbone. Casting the whole model
+            # -- which an unqualified .to(dtype) does -- pushes the DAC decoder
+            # into float16, where it underflows to digital silence: measured
+            # peak 0 on a 3.32s output that should have peaked near full scale.
             reference = reference.to(device)
+            reference.llm.to(dtype)
+            reference.audio_embeddings.to(dtype)
+            reference.audio_heads.to(dtype)
+            actual = next(reference.llm.parameters()).dtype
+            if actual != dtype:
+                raise RuntimeError(
+                    f"OmniVoice backbone loaded as {actual}, expected {dtype}. "
+                    "The fused flashinfer kernels need one dtype throughout."
+                )
+            logger.info("OmniVoice loaded: backbone %s, codec %s", actual,
+                        next(reference.audio_tokenizer.parameters()).dtype)
             # After .to(device): apply_flashinfer sizes its attention workspace
             # against model.device, and patching on CPU would allocate it there.
             fi.apply_flashinfer(reference, enable_cuda_graph=False)

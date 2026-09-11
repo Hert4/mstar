@@ -57,7 +57,12 @@ def encode_reference(codec: nn.Module, waveform: torch.Tensor) -> torch.Tensor:
         raise ValueError(
             f"Reference audio is shorter than one codec hop ({hop} samples)"
         )
-    waveform = waveform.to(device=codec.device, dtype=torch.float32)
+    # Follow the codec's own dtype rather than pinning float32: the checkpoint
+    # is loaded at the configured dtype and the codec is cast with it, so a
+    # hardcoded float32 input would be the same mixed-dtype fault the backbone
+    # hit.
+    codec_dtype = next(codec.parameters()).dtype
+    waveform = waveform.to(device=codec.device, dtype=codec_dtype)
     return codec.encode(waveform.unsqueeze(0)).audio_codes.squeeze(0)
 
 
@@ -93,10 +98,30 @@ def post_process(
     if audio.ndim == 1:
         audio = audio[None, :]
 
+    # A decode that is digitally silent is a fault, not a quiet result, and it
+    # has a specific cause worth naming: a codec running at a dtype it
+    # underflows in. Saying so beats the numpy error the silence used to
+    # produce three frames later.
+    if audio.size and not np.any(audio):
+        raise RuntimeError(
+            f"Codec decoded {audio.shape[-1]} samples of digital silence. "
+            "The usual cause is the codec running in float16; upstream keeps "
+            "it in float32."
+        )
+
     if enabled:
-        audio = remove_silence(
+        trimmed = remove_silence(
             audio, config.sample_rate, mid_sil=500, lead_sil=100, trail_sil=100
         )
+        # Over-trimming is a degraded result, not a server error: keep the
+        # untrimmed audio rather than letting an empty array reach .max().
+        if np.asarray(trimmed).size == 0:
+            logger.warning(
+                "Silence trim removed the whole utterance (%d samples); "
+                "returning it untrimmed.", audio.shape[-1],
+            )
+        else:
+            audio = trimmed
 
     if ref_rms is not None and ref_rms < 0.1:
         audio = audio * ref_rms / 0.1
