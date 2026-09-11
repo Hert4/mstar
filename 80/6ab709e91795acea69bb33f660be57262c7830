@@ -1,0 +1,56 @@
+mstar/model/omnivoice/components/text.py
+  s_6a1513f46bf006::t_57898637b96333 1-135
+mstar/model/omnivoice/submodules.py
+  s_6a1513f46bf006::t_310e0d67874a40 377-381,388
+  s_6a1513f46bf006::t_416a799ab1610d 164-166
+  s_6a1513f46bf006::t_be9d30de4eda3d 168-183
+  s_6a1513f46bf006::t_70770ee8130294 413-416
+  s_6a1513f46bf006::t_af01486661b27d 1-163,167,184-352,357-376,382-387,389-404,409-412
+  s_6a1513f46bf006::t_d51353827fa0f3 353-356
+  s_6a1513f46bf006::t_c9967598bff452 405-408
+mstar/model/omnivoice/components/codec.py
+  s_6a1513f46bf006::t_341a10cdd8c2de 1-114
+mstar/model/omnivoice/components/unmask.py
+  s_6a1513f46bf006::t_c22d6d76b68a91 1-172
+mstar/model/omnivoice/components/backbone.py
+  s_6a1513f46bf006::t_07245d3901f4db 1-244
+test/omnivoice/test_parity.py
+  s_6a1513f46bf006::t_da412f7f9a2fcb 1-299,301
+  s_6a1513f46bf006::t_4f304d087acf5b 300
+mstar/model/omnivoice/config.py
+  s_6a1513f46bf006::t_0f4d1326679655 1-120
+mstar/model/omnivoice/omnivoice_model.py
+  s_6a1513f46bf006::t_91a0ff61981870 431-433
+  s_6a1513f46bf006::t_e0c2f2f254b0fb 182-200
+  s_6a1513f46bf006::t_c96897acad62e0 332-340
+  s_6a1513f46bf006::t_8f27b792d8c209 434
+  s_6a1513f46bf006::t_b465ff48e2e48d 449,453
+  s_6a1513f46bf006::t_6f68af90382c5c 130-135
+  s_6a1513f46bf006::t_7e6b8f4f5bc168 160-164,167
+  s_6a1513f46bf006::t_d9ed9b8b316e4f 1-125,127-129,136-159,165-166,168-181,201-261,266-331,341-395,399-430,435-448,450-452,454-543
+  s_6a1513f46bf006::t_adf144e364969e 126
+  s_6a1513f46bf006::t_ebaad212f6a0ac 262-265
+  s_6a1513f46bf006::t_32e17497b76572 396-398
+configs/omnivoice.yaml
+  s_6a1513f46bf006::t_6e558ce6c1c69f 1-5
+mstar/api_server/openai/adapters.py
+  s_6a1513f46bf006::t_57dd1aefea3701 328-382,512
+mstar/model/registry.py
+  s_6a1513f46bf006::t_e05357edac69a4 11,38-41
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "806ab709e91795acea69bb33f660be57262c7830",
+  "prompts": {},
+  "sessions": {
+    "s_6a1513f46bf006": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ac6e8ce3-5474-420e-bfcf-bf8da9e52dfa",
+        "model": "claude-opus-5"
+      },
+      "human_author": "tmduc3 <tmduc3@rd.misa.com.vn>"
+    }
+  }
+}
