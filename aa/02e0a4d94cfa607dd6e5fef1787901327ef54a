@@ -1,0 +1,27 @@
+mstar/api_server/openai/adapters.py
+  s_6a1513f46bf006::t_194139ffc7e23b 371-373
+mstar/model/omnivoice/omnivoice_model.py
+  s_6a1513f46bf006::t_1535332582ca42 27-30,38,85,352-353,361-362,434-437,441-477,480,482-493,495-519,521,523-525,598-603
+mstar/model/omnivoice/submodules.py
+  s_6a1513f46bf006::t_9c149136715b41 264-266
+pyproject.toml
+  s_6a1513f46bf006::t_d97eb1708b3ed6 50-53
+test/omnivoice/test_parity.py
+  s_6a1513f46bf006::t_d531d2f190f674 160-169
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "aa02e0a4d94cfa607dd6e5fef1787901327ef54a",
+  "prompts": {},
+  "sessions": {
+    "s_6a1513f46bf006": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ac6e8ce3-5474-420e-bfcf-bf8da9e52dfa",
+        "model": "claude-opus-5"
+      },
+      "human_author": "tmduc3 <tmduc3@rd.misa.com.vn>"
+    }
+  }
+}
