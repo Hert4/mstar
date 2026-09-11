@@ -20,47 +20,68 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     HF_HUB_DISABLE_TELEMETRY=1
 
-# ffmpeg backs pydub, which the reference's silence trim uses on the decode tail.
+# TWO filesystem layers, total. This is a hard budget, not a style choice.
 #
-# The base ships two NVIDIA apt sources that no longer resolve -- the devtools
-# list 403s and the CUDA one fails certificate verification -- and either kills
-# `apt-get update` outright. They are dropped rather than worked around with
-# [trusted=yes]: nothing installed here comes from them.
+# The base sits at 121 layers and Docker's ceiling is 125. The first build of
+# this image came to 127 and the registry mirror rejected it outright with
+# "failed to register layer: max depth exceeded"; a three-layer version landed
+# on exactly 125, i.e. no headroom at all. So the source is copied FIRST and
+# everything else happens in one RUN, leaving two layers spare.
+#
+# The cost is cache behaviour: touching any source file invalidates the apt and
+# pip work below. That is the wrong trade in general and the right one here --
+# a rebuild is minutes, a mirror that refuses the image is a dead end.
+#
+# The durable fix is a thinner base. This one is a 50 GB sglang *development*
+# image and OmniVoice is a 0.6B model; it was chosen because it already carried
+# torch 2.13.0+cu129, transformers 5.12.1 and flashinfer 0.6.18 at compatible
+# versions, which is worth a lot, but 121 layers of someone else's build steps
+# is a ceiling this image will hit again.
+COPY . /opt/mstar
+WORKDIR /opt/mstar
+
+# What this single layer does:
+#   - drops the base's two dead NVIDIA apt sources (devtools 403s, CUDA fails
+#     certificate verification); either one aborts apt-get update, and nothing
+#     installed here comes from them
+#   - ffmpeg, which backs pydub for the reference's silence trim on the decode tail
+#   - omnivoice from git at a pinned commit, NOT PyPI: the published 0.2.1 wheel
+#     does not carry omnivoice/models/omnivoice_flashinfer.py, the packed
+#     fused-attention path this integration is built on. The pin is the exact
+#     tree the port was written and reviewed against.
+#   - --no-deps throughout: mstar and omnivoice both pin torch ranges that
+#     exclude the base's 2.13.0, and a resolve would downgrade torch and break
+#     flashinfer's ABI, defeating the reason for choosing this base. torchaudio,
+#     soundfile and torchcodec are already present, built against that torch.
+#   - accelerate, which is NOT optional despite --no-deps. transformers'
+#     from_pretrained calls check_and_set_device_map(), and that raises as
+#     soon as a torch device context is active -- which it is, because the
+#     engine manager builds submodules under one. Leaving it out got as far
+#     as a running pod before dying in HiggsAudioV2TokenizerModel.from_pretrained.
+#   - four guards that fail the BUILD rather than the first request: the
+#     private omnivoice surface the backbone drives, the model registry entry,
+#     and the backbone's own API check.
 RUN rm -f /etc/apt/sources.list.d/*cuda* /etc/apt/sources.list.d/*nvidia* \
  && apt-get update \
  && apt-get install -y --no-install-recommends ffmpeg \
- && rm -rf /var/lib/apt/lists/*
-
-# The reference package: mstar reuses its weight loading, its rule-based
-# duration estimator, its audio post-processing and — the reason performance
-# matches — its fused packed-attention forward. --no-deps for the torch reason
-# above; its own pure-python requirements come next.
-# From git at a pinned commit, NOT from PyPI: the published omnivoice 0.2.1
-# wheel does not carry omnivoice/models/omnivoice_flashinfer.py, which is the
-# packed fused-attention path this integration is built on. The pin is the
-# exact tree the port was written and reviewed against.
-#
-# torchaudio, soundfile and torchcodec are already in the base at versions
-# built against its torch; installing them again risks pulling a mismatched
-# pair, so only the two genuinely missing pure-python deps are named.
-RUN pip install --no-cache-dir --no-deps \
+ && rm -rf /var/lib/apt/lists/* \
+ && pip install --no-cache-dir --no-deps \
       "omnivoice @ git+https://github.com/k2-fsa/OmniVoice.git@08be0b4ccbac3e13e374e86fbfead4b4cac343e2" \
- && pip install --no-cache-dir pydub num2words \
- && python3 -c "import omnivoice, omnivoice.models.omnivoice_flashinfer as fi; \
-print('omnivoice ok'); \
+ && pip install --no-cache-dir pydub num2words accelerate \
+ && pip install --no-cache-dir --no-deps -e . \
+ && python3 -c "import omnivoice.models.omnivoice_flashinfer as fi; \
 [getattr(fi, n) for n in ('_CTX','PackedAttnRunner','_forward_logits','apply_flashinfer')]; \
-print('flashinfer surface ok')"
-
-WORKDIR /opt/mstar
-COPY . /opt/mstar
-RUN pip install --no-cache-dir --no-deps -e . \
+print('omnivoice + flashinfer surface ok')" \
  && python3 -c "from mstar.model.registry import get_model_class; \
-print('registry:', get_model_class('omnivoice').__name__)"
-
-# Fail at build time, not at the first request, if the private surface this
-# integration rides on has moved in the omnivoice version that got installed.
-RUN python3 -c "from mstar.model.omnivoice.components.backbone import assert_flashinfer_api; \
-assert_flashinfer_api(); print('backbone api guard ok')"
+print('registry:', get_model_class('omnivoice').__name__)" \
+ && python3 -c "from mstar.model.omnivoice.components.backbone import assert_flashinfer_api; \
+assert_flashinfer_api(); print('backbone api guard ok')" \
+ && python3 -c "import torch; assert torch.__version__.startswith('2.13.'), torch.__version__; \
+print('torch intact:', torch.__version__)" \
+ && python3 -c "import accelerate, transformers, omnivoice; \
+from mstar.model.omnivoice import omnivoice_model, submodules; \
+from mstar.model.omnivoice.components import backbone, codec, text, unmask; \
+print('serving imports ok; accelerate', accelerate.__version__)"
 
 EXPOSE 8080
 
