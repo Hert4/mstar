@@ -6,10 +6,10 @@ latent grid has its own geometry — OmniVoice's canvases differ only in length,
 so several requests genuinely share a step.  That is the whole reason to serve
 this model on M*: the reference's own server runs one request at a time.
 
-Batching here is dense and padded, the layout ``_generate_iterative`` already
-uses.  It wastes the length difference across a skewed batch, which the packed
-ragged-attention path in the reference's flashinfer module avoids; that is the
-follow-up, and it needs the Qwen3 body ported onto M*'s attention layer first.
+A step packs every request's two CFG documents end to end into one ragged row
+and runs the reference's own fused-kernel forward over it, so the per-step
+kernel path is the fastest one upstream ships -- and the batch spans concurrent
+requests, which theirs cannot.
 """
 
 import logging
@@ -22,7 +22,7 @@ from mstar.conductor.request_info import CurrentForwardPassInfo
 from mstar.model.omnivoice.components.backbone import (
     CanvasItem,
     OmniVoiceBackbone,
-    build_canvas_batch,
+    build_packed_canvas,
 )
 from mstar.model.omnivoice.components.codec import (
     decode_canvas,
@@ -218,7 +218,9 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
                 "step_index": step_index,
             },
             kwargs={"request_id": fwd_info.request_id},
-            input_seq_len=prefix_ids.shape[-1] + target_len,
+            # Both CFG documents are packed, so the row's real contribution
+            # is the conditional length plus the target again.
+            input_seq_len=prefix_ids.shape[-1] + 2 * target_len,
         )
 
     def preprocess(
@@ -235,11 +237,27 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
         """
         return {"rows": inputs}
 
-    def can_batch(self, batch, model_inputs: list[NodeInputs]) -> bool:
-        return True
-
     def max_batch_size(self, graph_walk: str):
         return self.config.max_batch_size
+
+    def can_batch(self, batch, model_inputs: list[NodeInputs]) -> bool:
+        """Cap the step by packed tokens, not by row count.
+
+        Cost per step is ``sum(doc_lens)`` through a bidirectional attention
+        plus a head GEMM over ``2 * sum(target_len)``; eight 30-second requests
+        and eight 2-second ones are two very different steps. Row count alone
+        would let the first case allocate a float32 logits tensor several
+        hundred MB wide.
+        """
+        packed = sum(inp.input_seq_len for inp in model_inputs)
+        if packed > self.config.max_packed_tokens:
+            logger.debug(
+                "OmniVoice backbone: %d packed tokens over the %d cap; "
+                "the scheduler will split this batch",
+                packed, self.config.max_packed_tokens,
+            )
+            return False
+        return True
 
     # -- forward ----------------------------------------------------------
 
@@ -268,14 +286,8 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
                 )
             )
 
-        batch = build_canvas_batch(items, self.config.audio_mask_id, device)
-
-        with torch.inference_mode():
-            logits = self.backbone(
-                input_ids=batch.input_ids,
-                audio_mask=batch.audio_mask,
-                attention_mask=batch.attention_mask,
-            ).to(torch.float32)
+        canvas = build_packed_canvas(items, self.config.audio_mask_id, device)
+        logits = self.backbone(canvas).to(torch.float32)
 
         outputs: dict[str, NameToTensorList] = {}
         for item, row in zip(items, rows, strict=True):
@@ -290,7 +302,7 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
                 t_shift=float(meta["t_shift"]),
             )
 
-            c_logits, u_logits = batch.slice_logits(logits, item)
+            c_logits, u_logits = canvas.slice_logits(logits, item)
             pred_tokens, scores = predict_tokens_with_scoring(
                 c_logits=c_logits,
                 u_logits=u_logits,

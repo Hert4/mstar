@@ -39,7 +39,10 @@ from mstar.graph.base import (
 )
 from mstar.graph.special_destinations import EMIT_TO_CLIENT, EMPTY_DESTINATION
 from mstar.model.base import ForwardPassArgs, Model
-from mstar.model.omnivoice.components.backbone import OmniVoiceBackbone
+from mstar.model.omnivoice.components.backbone import (
+    OmniVoiceBackbone,
+    assert_flashinfer_api,
+)
 from mstar.model.omnivoice.components.codec import load_codec
 from mstar.model.omnivoice.components.text import build_prefix
 from mstar.model.omnivoice.config import OmniVoiceConfig
@@ -589,10 +592,12 @@ class OmniVoiceModel(Model):
             # components/backbone.py.
             from omnivoice.models.omnivoice import OmniVoice
 
+            fi = assert_flashinfer_api()
+            dtype = getattr(torch, self.config.load_dtype)
             reference = OmniVoice.from_pretrained(
                 self.model_path_hf,
                 cache_dir=self.cache_dir,
-                dtype=torch.bfloat16,
+                dtype=dtype,
             ).eval()
             self._refresh_checkpoint_defaults(reference.config)
             if self._codec is None and reference.audio_tokenizer is not None:
@@ -601,13 +606,11 @@ class OmniVoiceModel(Model):
                 self._codec = reference.audio_tokenizer.to(device)
                 self.config.frame_rate = float(self._codec.config.frame_rate)
                 self.config.sample_rate = int(self._codec.config.sample_rate)
-            backbone = OmniVoiceBackbone(
-                llm=reference.llm,
-                audio_embeddings=reference.audio_embeddings,
-                audio_heads=reference.audio_heads,
-                codebook_layer_offsets=reference.codebook_layer_offsets,
-                config=self.config,
-            ).to(device).eval()
+            reference = reference.to(device)
+            # After .to(device): apply_flashinfer sizes its attention workspace
+            # against model.device, and patching on CPU would allocate it there.
+            fi.apply_flashinfer(reference, enable_cuda_graph=False)
+            backbone = OmniVoiceBackbone(reference, plan_dtype=dtype).eval()
             return OmniVoiceBackboneSubmodule(backbone, self.config)
 
         return None

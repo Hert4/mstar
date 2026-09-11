@@ -100,10 +100,19 @@ class OmniVoiceConfig:
     # being silently truncated.
     max_target_seconds: float = 30.0
 
-    # Dense padded batching pads a step's canvases to the batch maximum, so a
-    # batch whose lengths are very skewed wastes the difference.  The micro
-    # scheduler only knows the count, hence a plain cap.
-    max_batch_size: int = 8
+    # Requests per step. Packing is ragged so length skew costs nothing; this
+    # bounds the Python-side per-item work and the number of reveal loops.
+    max_batch_size: int = 16
+
+    # The cap that actually matters: a step's cost is sum(doc_lens) tokens
+    # through bidirectional attention, plus a head GEMM and a float32 logits
+    # tensor over 2 * sum(target_len). Checked in the backbone's can_batch.
+    max_packed_tokens: int = 24576
+
+    # The reference's packed path plans flashinfer with float16 and its own CLI
+    # loads the checkpoint that way, so fp16 is the tuned path -- the plan dtype
+    # and the q/k dtype have to agree.
+    load_dtype: str = "float16"
 
     # Set by _refresh_checkpoint_defaults; None until weights load.
     checkpoint_dtype: str | None = None
