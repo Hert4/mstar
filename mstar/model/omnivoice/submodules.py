@@ -261,7 +261,9 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
                     request_id=rid,
                     prefix_ids=row.tensor_inputs["prefix_ids"],
                     prefix_audio_mask=row.tensor_inputs["prefix_audio_mask"],
-                    tokens=row.tensor_inputs["audio_tokens"].unsqueeze(0),
+                    # Cloned, not viewed: apply_reveal writes in place, and
+                    # the input tensor is the previous iteration's edge.
+                    tokens=row.tensor_inputs["audio_tokens"].clone().unsqueeze(0),
                     guidance_scale=float(meta["guidance_scale"]),
                 )
             )

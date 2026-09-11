@@ -24,7 +24,10 @@ import numpy as np
 import torch
 
 from mstar.communication.tensors import NameToTensorList
-from mstar.conductor.request_info import CurrentForwardConductorMetadata
+from mstar.conductor.request_info import (
+    CurrentForwardConductorMetadata,
+    StreamingConnectionState,
+)
 from mstar.engine.resources import NodeResourceSpec
 from mstar.graph.base import (
     GraphEdge,
@@ -32,6 +35,7 @@ from mstar.graph.base import (
     GraphSection,
     Loop,
     Sequential,
+    TensorPointerInfo,
 )
 from mstar.graph.special_destinations import EMIT_TO_CLIENT, EMPTY_DESTINATION
 from mstar.model.base import ForwardPassArgs, Model
@@ -78,6 +82,7 @@ class OmniVoiceModel(Model):
 
         self._submodule_cache: dict[str, NodeSubmodule | None] = {}
         self._codec: torch.nn.Module | None = None
+        self._codec_hop: int | None = None
 
     # ------------------------------------------------------------------
     # Model ABC: structure
@@ -344,6 +349,8 @@ class OmniVoiceModel(Model):
         """The codec's hop, read from its config without loading the weights."""
         if self._codec is not None:
             return int(self._codec.config.hop_length)
+        if self._codec_hop is not None:
+            return self._codec_hop
         from transformers import AutoConfig
 
         from mstar.model.omnivoice.config import CODEC_SUBFOLDER
@@ -351,7 +358,8 @@ class OmniVoiceModel(Model):
         cfg = AutoConfig.from_pretrained(
             self.model_path_hf, subfolder=CODEC_SUBFOLDER, cache_dir=self.cache_dir
         )
-        return int(cfg.hop_length)
+        self._codec_hop = int(cfg.hop_length)
+        return self._codec_hop
 
     def get_initial_forward_pass_args(
         self,
@@ -423,23 +431,98 @@ class OmniVoiceModel(Model):
             kwargs=kwargs,
         )
 
-        inputs = []
+        # Only the FIRST walk is seeded here. Everything else stays persisted
+        # and is picked up from ``persist_signals`` when the schedule steps --
+        # feeding a later walk's node now would target a node this walk does
+        # not contain.
         if is_clone:
             edge = GraphEdge(next_node="ref_encoder", name="ref_audio_inputs")
             edge.tensor_info = input_signals["ref_audio_inputs"]
-            inputs.append(edge)
-            rms_edge = GraphEdge(next_node="code2wav", name="ref_rms")
-            rms_edge.tensor_info = input_signals["ref_rms"]
-            inputs.append(rms_edge)
-        for name in ("prefix_ids", "prefix_audio_mask", "target_len"):
-            edge = GraphEdge(next_node="backbone", name=name)
-            edge.tensor_info = input_signals[name]
-            inputs.append(edge)
+            inputs = [edge]
+        else:
+            inputs = self._speech_gen_inputs(schedule[0], input_signals)
 
+        unpersist_tensors = sum([inp.tensor_info for inp in inputs], start=[])
         return ForwardPassArgs(
             full_metadata=full_metadata,
             inputs=inputs,
-            unpersist_tensors=[],
+            unpersist_tensors=unpersist_tensors,
+            step_metadata=self._get_step_metadata(full_metadata),
+        )
+
+    def _get_step_metadata(self, metadata: CurrentForwardConductorMetadata) -> dict:
+        """Per-pass metadata the submodules read from ``request_info.step_metadata``."""
+        kw = metadata.kwargs
+        return {
+            "is_prefill": metadata.is_prefill,
+            "num_step": kw["num_step"],
+            "guidance_scale": kw["guidance_scale"],
+            "t_shift": kw["t_shift"],
+            "layer_penalty_factor": kw["layer_penalty_factor"],
+            "position_temperature": kw["position_temperature"],
+            "class_temperature": kw["class_temperature"],
+            "postprocess_output": kw["postprocess_output"],
+            "pad_duration": kw["pad_duration"],
+            "fade_duration": kw["fade_duration"],
+        }
+
+    def _speech_gen_inputs(
+        self, walk: str, persist_signals: dict[str, list[TensorPointerInfo]],
+    ) -> list[GraphEdge]:
+        """External inputs seeding a speech walk.
+
+        The loop-back edges go in empty; the backbone seeds the canvas and the
+        step counter at iteration 0.
+        """
+        inputs: list[GraphEdge] = []
+        for name in ("prefix_ids", "prefix_audio_mask", "target_len"):
+            edge = GraphEdge(next_node="backbone", name=name)
+            edge.tensor_info = persist_signals.get(name, [])
+            inputs.append(edge)
+        if walk == self.SPEECH_GEN_CLONE_WALK:
+            ref_edge = GraphEdge(next_node="backbone", name="ref_audio_tokens")
+            ref_edge.tensor_info = persist_signals.get("ref_audio_tokens", [])
+            inputs.append(ref_edge)
+            rms_edge = GraphEdge(next_node="code2wav", name="ref_rms")
+            rms_edge.tensor_info = persist_signals.get("ref_rms", [])
+            inputs.append(rms_edge)
+        inputs += [
+            GraphEdge(next_node="backbone", name="audio_tokens"),
+            GraphEdge(next_node="backbone", name="step_index"),
+        ]
+        return inputs
+
+    def get_partition_forward_pass_args(
+        self,
+        partition_name: str,
+        partition_metadata: CurrentForwardConductorMetadata,
+        persist_signals: dict[str, list[TensorPointerInfo]],
+        incoming_connections: list[StreamingConnectionState] | None = None,
+    ) -> ForwardPassArgs:
+        """Step through the request's fixed walk schedule; done after the speech walk."""
+        metadata = partition_metadata
+        request_done = False
+        inputs: list[GraphEdge] = []
+
+        schedule = metadata.kwargs["walk_schedule"]
+        step = metadata.kwargs["walk_step"] + 1
+        if step < len(schedule):
+            metadata.kwargs["walk_step"] = step
+            walk = schedule[step]
+            metadata.graph_walk = walk
+            metadata.is_prefill = walk == self.ENCODE_REFERENCE_WALK
+            inputs = self._speech_gen_inputs(walk, persist_signals)
+        else:
+            # The speech walk completed — one utterance per request.
+            request_done = True
+
+        unpersist_tensors = sum([inp.tensor_info for inp in inputs], start=[])
+        return ForwardPassArgs(
+            full_metadata=metadata,
+            inputs=inputs,
+            unpersist_tensors=unpersist_tensors,
+            step_metadata=self._get_step_metadata(metadata),
+            request_done=request_done,
         )
 
     def get_output_sample_rate(self, modality: str = "audio") -> int:
@@ -512,6 +595,12 @@ class OmniVoiceModel(Model):
                 dtype=torch.bfloat16,
             ).eval()
             self._refresh_checkpoint_defaults(reference.config)
+            if self._codec is None and reference.audio_tokenizer is not None:
+                # from_pretrained already built one (~800 MB fp32); a second
+                # copy for the codec nodes would be pure waste on a shared GPU.
+                self._codec = reference.audio_tokenizer.to(device)
+                self.config.frame_rate = float(self._codec.config.frame_rate)
+                self.config.sample_rate = int(self._codec.config.sample_rate)
             backbone = OmniVoiceBackbone(
                 llm=reference.llm,
                 audio_embeddings=reference.audio_embeddings,

@@ -157,11 +157,16 @@ def test_prefix_parity():
              instruct=None, ref_text="你好。", ref_len=37),
     ]
 
-    ref_model = OmniVoice.__new__(OmniVoice)
-    ref_model.config = RefConfig()
-    ref_model.text_tokenizer = tokenizer
-    # _prepare_inference_inputs only touches config, tokenizer and .device.
-    object.__setattr__(ref_model, "_device_override", torch.device("cpu"))
+    # _prepare_inference_inputs reads only config, text_tokenizer and device.
+    # OmniVoice.__new__ would skip __init__ and leave `.device` -- a
+    # PreTrainedModel property over parameters() -- raising, so stand in a
+    # plain object carrying the three attributes it actually touches.
+    class _Ref:
+        config = RefConfig()
+        text_tokenizer = tokenizer
+        device = torch.device("cpu")
+
+    ref_model = _Ref()
 
     for case in cases:
         ref_audio_tokens = (

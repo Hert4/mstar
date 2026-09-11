@@ -368,7 +368,9 @@ class OmniVoiceAdapter(OpenAIAdapter):
             path, _mime = media_io.resolve_media_ref(
                 ref_audio, upload_dir, allow_remote=True
             )
-            file_paths = [path]
+            # Keyed by modality: the data worker iterates the dict and
+            # loads each group through the matching loader.
+            file_paths = {"audio": [path]}
             input_modalities = ["text", "audio"]
 
         return SubmitArgs(
