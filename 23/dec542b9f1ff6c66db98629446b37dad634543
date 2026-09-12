@@ -1,0 +1,19 @@
+docker/msao-exp.Dockerfile
+  s_6a1513f46bf006::t_c992dd1ebc8d4e 56-60,75,82-85
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "23dec542b9f1ff6c66db98629446b37dad634543",
+  "prompts": {},
+  "sessions": {
+    "s_6a1513f46bf006": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ac6e8ce3-5474-420e-bfcf-bf8da9e52dfa",
+        "model": "claude-opus-5"
+      },
+      "human_author": "tmduc3 <tmduc3@rd.misa.com.vn>"
+    }
+  }
+}
