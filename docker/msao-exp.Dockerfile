@@ -63,6 +63,14 @@ WORKDIR /opt/mstar
 #     spec_from_file_location(..., source_root / "__init__.py"), so an
 #     empty one is created here. Safe: both modules import only torch,
 #     transformers and numpy, with no relative imports to resolve.
+#
+#     The transformers pin is not arbitrary either: the codec source is
+#     written against 4.57's `check_model_inputs()`, a decorator factory.
+#     In 5.x the same name IS the decorator and takes the function, so the
+#     call form raises TypeError at import. Rewriting the one call site to
+#     `@check_model_inputs` restores the 4.57 default behaviour under the
+#     5.x API. The guard below then loads the classes through M*'s own
+#     loader, i.e. the exact path that failed at serving time.
 #   - accelerate, which is NOT optional despite --no-deps. transformers'
 #     from_pretrained calls check_and_set_device_map(), and that raises as
 #     soon as a torch device context is active -- which it is, because the
@@ -80,7 +88,11 @@ RUN rm -f /etc/apt/sources.list.d/*cuda* /etc/apt/sources.list.d/*nvidia* \
       "qwen-tts==0.1.1" \
  && python3 -c "import importlib.metadata as m, pathlib; \
 p = pathlib.Path(m.distribution('qwen-tts').locate_file('qwen_tts/core/tokenizer_12hz')); \
-(p / '__init__.py').touch(); print('qwen-tts 12hz: added missing __init__.py')" \
+(p / '__init__.py').touch(); \
+f = p / 'modeling_qwen3_tts_tokenizer_v2.py'; t = f.read_text(); \
+assert '@check_model_inputs()' in t, 'decorator call not found; check the wheel'; \
+f.write_text(t.replace('@check_model_inputs()', '@check_model_inputs')); \
+print('qwen-tts 12hz: __init__.py added, check_model_inputs adapted')" \
  && pip install --no-cache-dir pydub num2words accelerate \
  && pip install --no-cache-dir --no-deps -e . \
  && python3 -c "import omnivoice.models.omnivoice_flashinfer as fi; \
@@ -88,9 +100,8 @@ p = pathlib.Path(m.distribution('qwen-tts').locate_file('qwen_tts/core/tokenizer
 print('omnivoice + flashinfer surface ok')" \
  && python3 -c "from mstar.model.registry import get_model_class; \
 print('registry:', get_model_class('omnivoice').__name__, get_model_class('qwen3_tts').__name__, get_model_class('qwen3_asr').__name__)" \
- && python3 -c "import importlib.metadata as m, pathlib; \
-p = pathlib.Path(m.distribution('qwen-tts').locate_file('qwen_tts/core/tokenizer_12hz')); \
-assert (p / '__init__.py').is_file(), p; print('qwen-tts 12hz codec sources ok')" \
+ && python3 -c "from mstar.model.qwen3_tts.qwen3_tts_model import _load_qwen3_tts_decoder_classes as L; \
+print('qwen-tts 12hz codec loads:', [c.__name__ for c in L()])" \
  && python3 -c "from mstar.model.omnivoice.components.backbone import assert_flashinfer_api; \
 assert_flashinfer_api(); print('backbone api guard ok')" \
  && python3 -c "import torch; assert torch.__version__.startswith('2.13.'), torch.__version__; \
