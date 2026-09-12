@@ -1,0 +1,27 @@
+mstar/engine/engine.py
+  s_6a1513f46bf006::t_0b80c0f35169f6 1043-1047
+mstar/model/submodule_base.py
+  s_6a1513f46bf006::t_545b2f66ef0613 474-497
+mstar/model/whisper/submodules.py
+  s_6a1513f46bf006::t_c487acb76bb8aa 311-328
+mstar/worker/micro_scheduler.py
+  s_6a1513f46bf006::t_cf65fb0583f936 108-114,146-147,154-159,163-206
+test/modular/test_micro_scheduler.py
+  s_6a1513f46bf006::t_76786b138738da 30-34,76-77,82-84,90-93,513-583
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "5b0540e54ae3c3393ed9032c4ca13a4a1e81505f",
+  "prompts": {},
+  "sessions": {
+    "s_6a1513f46bf006": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ac6e8ce3-5474-420e-bfcf-bf8da9e52dfa",
+        "model": "claude-opus-5"
+      },
+      "human_author": "tmduc3 <tmduc3@rd.misa.com.vn>"
+    }
+  }
+}
