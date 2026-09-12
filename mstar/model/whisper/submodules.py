@@ -99,12 +99,26 @@ class WhisperEncoderSubmodule(NodeSubmodule):
     # Without them the base class applies: ``can_batch`` is False and the
     # default ``preprocess`` raises on more than one input, so the node ran one
     # request per forward — 1500 encoder positions at batch 1, once per
-    # request. That cost never amortised, and because a request only reaches
-    # the decoder after its own encoder pass, it also paced arrivals into the
-    # decode loop: requests entered ~one per encoder pass, so the decode batch
-    # could not fill either. Measured at concurrency 16, decode averaged 2.3
-    # requests of a possible 16.
-    MAX_BATCH_SIZE = 16
+    # request, and that cost never amortised.
+    #
+    # This cap is NOT the decoder's. A decode step reads a KV cache that was
+    # already reserved, so its batch costs no new memory and the cap can sit
+    # at whatever the graphs captured. An encoder pass allocates fresh
+    # activations for 32 layers over the whole 1500-position window, so its
+    # batch buys throughput with memory it has to find at the time. Copying
+    # the decoder's 16 here OOMed a 15 GB fraction at concurrency 16 (weights
+    # 3.1 + graphs 2.3 + KV 5.7 leaves ~4 GB), with a batch of 7 observed.
+    # Four is what that headroom takes; a node with more room should raise it.
+    MAX_BATCH_SIZE = 4
+
+    # The engine torch.compiles both forwards. ``forward_batched`` returns a
+    # dict keyed by request id, and those keys change every call, so dynamo
+    # re-specialises on each one: measured 8 recompiles of ~2.8 s before the
+    # recompile limit tripped and it settled into eager, which is where it
+    # stays. Compiling buys nothing here and costs the first 8 requests after
+    # every restart, so skip it. (``forward`` is unreachable now that
+    # ``can_batch`` is True, so this gives up nothing else.)
+    disable_torch_compile = True
 
     def can_batch(
         self, batch: ExecutingBatch,
