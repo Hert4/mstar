@@ -308,6 +308,24 @@ class WhisperDecoderSubmodule(ARNodeSubmodule):
         del graph_walk
         return self.MAX_BATCH_SIZE
 
+    def graph_walk_priority(self, graph_walk: str) -> int:
+        """Decode ahead of prefill.
+
+        The two walks differ by ~8x in cost: a decode step reads the decoder
+        weights once for the whole batch (~4.7 ms), while a prefill projects
+        cross-K/V over the full 1500-frame encoder window for each new
+        request (~28 ms, on top of the encoder's own ~9 ms). Round-robin
+        gives them equal turns, so prefill takes most of the device and
+        decode advances a step per lap — measured at concurrency 16, decode
+        batches averaged 2.3 of a possible 16, and the per-request prefill
+        stage stretched from 47 ms idle to over 2 s.
+
+        Decode-first is also what makes prefill cheaper: held back, new
+        requests pool and go through the encoder as one batch instead of
+        one pass each.
+        """
+        return 1 if graph_walk == "decode" else 0
+
     def forward_batched(
         self,
         graph_walk: str,

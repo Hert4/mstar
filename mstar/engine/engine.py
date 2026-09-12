@@ -1040,6 +1040,11 @@ class Engine:
         capped = [cap for cap in caps if cap is not None]
         return min(capped) if capped else None
 
+    def get_graph_walk_priority(self, node_name: str, graph_walk: str) -> int:
+        """What the submodule asks the scheduler to serve first. See
+        ``NodeSubmodule.graph_walk_priority``; 0 for a node that opts out."""
+        return self._submodules[node_name].submodule.graph_walk_priority(graph_walk)
+
     def check_ready(
         self, node_name: str, request_id: str,
         request_info: CurrentForwardPassInfo,

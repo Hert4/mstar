@@ -105,6 +105,13 @@ class MicroScheduler:
     # Seconds to wait before retrying a held request after OOM
     HOLD_BACKOFF_SECONDS = 0.05
 
+    # Consecutive times a (node, walk) may lose the pick on priority alone
+    # before it is promoted regardless. Bounds how long the lower band waits
+    # in *steps of the higher band*, which is the unit that matters: for
+    # Whisper that is 8 decode steps, ~40 ms, in exchange for decode holding
+    # 8 turns in 9 instead of the 1 in 3 round-robin gave it.
+    MAX_PRIORITY_SKIPS = 8
+
     def __init__(
         self, engine_manager: EngineManager,
         sched_type=SchedulingType.ROUND_ROBIN,
@@ -136,29 +143,67 @@ class MicroScheduler:
         self.backlog: dict[tuple[str, str], ScheduledBatch] = {}
 
         self.node_and_walk_to_last_batch_num = {}
+        # (node, walk) -> consecutive picks lost on priority alone
+        self._priority_skips: dict[tuple[str, str], int] = {}
         # request_id -> monotonic time until which the request is held
         self.held_until: dict[str, float] = {}
         # Rids with a deferred remove; stop initiating new work for them.
         # Shared by reference with Worker._pending_removes.
         self.pending_removes: set[str] = set()
 
+    def _graph_walk_priority(self, node_name: str, graph_walk: str) -> int:
+        """What the submodule asks to be served first, 0 when it opts out."""
+        return self.engine_manager.get_engine(node_name).get_graph_walk_priority(
+            node_name, graph_walk
+        )
+
     def _select_node_rr(
         self, node_name_to_requests: dict[str, list[ReadyNodeEntry]]
     ):
-        best_node_name = None
-        best_graph_walk = None
-        least_recent_step = float('inf')
+        """Least-recently-served (node, walk), within the top priority band.
 
-        for node_name, reqs in node_name_to_requests.items():
-            for req in reqs:
-                step = self.node_and_walk_to_last_batch_num.get((
-                    node_name, req.graph_walk
-                ), 0)
-                if step < least_recent_step:
-                    least_recent_step = step
-                    best_node_name = node_name
-                    best_graph_walk = req.graph_walk
-        return best_node_name, best_graph_walk
+        Round-robin alone divides the device by turn count, so a walk with a
+        far more expensive step quietly takes most of the GPU on an equal
+        share of turns — see ``NodeSubmodule.graph_walk_priority``. Banding
+        by priority first lets a model say which walk that is.
+
+        A model that declares nothing leaves every candidate at priority 0,
+        one band, and this is the round-robin it always was.
+        """
+        candidates = {
+            (node_name, req.graph_walk)
+            for node_name, reqs in node_name_to_requests.items()
+            for req in reqs
+        }
+        if not candidates:
+            return None, None
+
+        priority = {c: self._graph_walk_priority(*c) for c in candidates}
+
+        # Strict priority would starve the lower band for as long as the top
+        # one stays ready — for Whisper that is "admit no new request while
+        # any request is still decoding". Anything passed over purely on
+        # priority carries a counter and is promoted once it trips, which
+        # bounds the wait without giving the turns back.
+        starved = [
+            c for c in candidates
+            if self._priority_skips.get(c, 0) >= self.MAX_PRIORITY_SKIPS
+        ]
+        top = max(priority.values())
+        band = starved or [c for c in candidates if priority[c] == top]
+
+        # `candidates` is a set, so the tie-break carries the key itself to
+        # keep the choice stable across passes with the same ready set.
+        best = min(
+            band,
+            key=lambda c: (self.node_and_walk_to_last_batch_num.get(c, 0), c),
+        )
+        for c in candidates:
+            if c == best:
+                self._priority_skips.pop(c, None)
+            elif priority[c] < priority[best]:
+                self._priority_skips[c] = self._priority_skips.get(c, 0) + 1
+        return best
 
     def hold_requests(self, request_ids: list[str]) -> None:
         """Put requests on hold for a brief backoff period after OOM."""

@@ -471,6 +471,30 @@ class NodeSubmodule(torch.nn.Module, ABC):
     def max_batch_size(self, graph_walk: str):
         return None
 
+    def graph_walk_priority(self, graph_walk: str) -> int:
+        """Scheduling priority of this walk; higher is served first.
+
+        The scheduler is round-robin over every ready (node, walk), which
+        splits the device evenly by *turn count* rather than by cost. A walk
+        whose step costs an order of magnitude more than another's therefore
+        takes an order of magnitude more of the GPU while holding the same
+        share of turns, and the cheap walk starves.
+
+        Whisper is the worked example: a decode step is ~4.7 ms while a
+        prefill (1500-frame encode plus the cross-K/V projection over that
+        window) is ~37 ms, so round-robin hands prefill most of the device
+        and decode advances one step per lap. Decode batches then never
+        fill, which is the one thing that amortizes the per-step weight
+        read over more requests.
+
+        Default ``0`` for every walk keeps the pure round-robin the
+        scheduler has always had, so a model that does not override this is
+        unaffected. Starvation of the lower band is bounded by the
+        scheduler, not by this value.
+        """
+        del graph_walk
+        return 0
+
     def get_autocast_dtype(self) -> torch.dtype | None:
         """Per-submodule autocast dtype override for the engine's forward
         wrap. The engine consults this on each ``execute_batch`` and uses

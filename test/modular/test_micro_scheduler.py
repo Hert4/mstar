@@ -27,7 +27,11 @@ from mstar.engine.resources.step import (
     AdmitRuntimeError,
     FullAdmitOutcome,
 )
-from mstar.worker.micro_scheduler import MicroScheduler, ScheduledBatch
+from mstar.worker.micro_scheduler import (
+    MicroScheduler,
+    ReadyNodeEntry,
+    ScheduledBatch,
+)
 
 NODE = "LLM"
 WALK = "decode"
@@ -69,15 +73,23 @@ class _Manager:
 
 
 class _Engine:
-    def __init__(self, max_bs=None, not_ready=frozenset(), unservable=frozenset()):
+    def __init__(self, max_bs=None, not_ready=frozenset(), unservable=frozenset(),
+                 priority=None):
         self._max_bs = max_bs
         self.not_ready = set(not_ready)
         # rids a resource rejects outright, as opposed to "not yet"
         self.unservable = set(unservable)
+        # graph_walk -> priority; empty leaves every walk in one band, which
+        # is the plain round-robin the rest of these tests assert on
+        self.priority = dict(priority or {})
 
     def get_max_batch_size(self, node_name, graph_walk):
         del node_name, graph_walk
         return self._max_bs
+
+    def get_graph_walk_priority(self, node_name, graph_walk):
+        del node_name
+        return self.priority.get(graph_walk, 0)
 
     def check_ready(self, node_name, rid, fwd_info):
         del node_name, fwd_info
@@ -498,3 +510,74 @@ def test_clearing_a_rid_forgets_its_undelivered_admit_error():
 
     assert sched.take_admit_errors() == {}
     assert sched.failed_rids == set()
+
+
+# ── priority banding ────────────────────────────────────────────────────
+#
+# Round-robin divides the device by turn count, so a walk whose step costs
+# far more than another's takes most of the GPU on an equal share of turns.
+# A model can declare which walk to serve first; the scheduler bands on that
+# and bounds how long the loser waits.
+
+PREFILL = "prefill"
+
+
+def _ready(walks: dict[str, str]) -> dict[str, list[ReadyNodeEntry]]:
+    """rid -> walk, as the scheduler's grouped ready set for one node."""
+    return {NODE: [ReadyNodeEntry(rid, "wg0", walk) for rid, walk in walks.items()]}
+
+
+def _banded(**priority) -> MicroScheduler:
+    return _scheduler(_Engine(priority=priority))
+
+
+def test_a_flat_table_leaves_the_round_robin_untouched():
+    sched = _banded()
+    sched.node_and_walk_to_last_batch_num[(NODE, WALK)] = 7
+
+    # prefill has never run, so the stale cursor alone decides
+    assert sched._select_node_rr(_ready({"r0": WALK, "r1": PREFILL})) == (NODE, PREFILL)
+
+
+def test_the_top_band_wins_against_an_older_cursor():
+    sched = _banded(decode=1)
+    sched.node_and_walk_to_last_batch_num[(NODE, WALK)] = 99
+
+    # prefill's cursor is 0 against decode's 99; priority still takes it
+    assert sched._select_node_rr(_ready({"r0": WALK, "r1": PREFILL})) == (NODE, WALK)
+
+
+def test_the_lower_band_is_promoted_once_it_trips_the_skip_bound():
+    sched = _banded(decode=1)
+    ready = _ready({"r0": WALK, "r1": PREFILL})
+
+    for _ in range(MicroScheduler.MAX_PRIORITY_SKIPS):
+        assert sched._select_node_rr(ready) == (NODE, WALK)
+
+    assert sched._select_node_rr(ready) == (NODE, PREFILL)
+
+
+def test_being_served_clears_the_skip_counter():
+    sched = _banded(decode=1)
+    ready = _ready({"r0": WALK, "r1": PREFILL})
+
+    for _ in range(MicroScheduler.MAX_PRIORITY_SKIPS + 1):
+        sched._select_node_rr(ready)
+    assert (NODE, PREFILL) not in sched._priority_skips
+
+    # and the bound starts over rather than alternating from here on
+    assert sched._select_node_rr(ready) == (NODE, WALK)
+
+
+def test_a_walk_alone_in_the_ready_set_is_never_skipped():
+    """Nothing outranks it, so the counter must not creep up and hand it a
+    promotion it never needed."""
+    sched = _banded(decode=1)
+
+    for _ in range(MicroScheduler.MAX_PRIORITY_SKIPS * 2):
+        assert sched._select_node_rr(_ready({"r0": PREFILL})) == (NODE, PREFILL)
+    assert sched._priority_skips == {}
+
+
+def test_an_empty_ready_set_selects_nothing():
+    assert _banded(decode=1)._select_node_rr({}) == (None, None)
