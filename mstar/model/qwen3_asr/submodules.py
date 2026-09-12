@@ -287,7 +287,17 @@ class Qwen3ASRDecoderSubmodule(ARNodeSubmodule):
             # packed prefill: one hidden per request, at its last token
             hidden = attn.select_last_hidden(hidden)
 
-        logits = self.decoder.lm_head(hidden)
+        # fp32 before the sampler, which argmaxes whatever dtype it is handed
+        # (its Triton kernel loads the logits tensor as-is). bf16 carries 8
+        # mantissa bits, and over a 151,936-entry vocabulary that rounds
+        # near-tied logits onto the same value often enough to change the
+        # transcript: measured against vLLM on this checkpoint, 19 word
+        # errors in 303 against 13, every one a single-word substitution on
+        # a hard word with the rest of the sentence identical, and stable
+        # across three builds because the rounding is deterministic. vLLM
+        # upcasts for the same reason and says so — "Use float32 to avoid
+        # bf16 precision loss on large vocab indices".
+        logits = self.decoder.lm_head(hidden).float()
         return sampler.sample(engine_inputs.request_ids, logits=logits)
 
     def forward(
