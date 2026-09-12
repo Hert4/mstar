@@ -57,7 +57,12 @@ WORKDIR /opt/mstar
 #     just preferred: its metadata pins transformers==4.57.3 against the
 #     base's 5.12.1. Only the files are needed — qwen3_tts_model loads the
 #     two tokenizer_12hz sources directly under a private package name so
-#     the package's own __init__ (which drags in pysox) never runs.
+#     the package's own __init__ (which drags in pysox) never runs. The
+#     published 0.1.1 wheel ships that directory WITHOUT an __init__.py —
+#     it is a namespace package there — while the loader does
+#     spec_from_file_location(..., source_root / "__init__.py"), so an
+#     empty one is created here. Safe: both modules import only torch,
+#     transformers and numpy, with no relative imports to resolve.
 #   - accelerate, which is NOT optional despite --no-deps. transformers'
 #     from_pretrained calls check_and_set_device_map(), and that raises as
 #     soon as a torch device context is active -- which it is, because the
@@ -73,6 +78,9 @@ RUN rm -f /etc/apt/sources.list.d/*cuda* /etc/apt/sources.list.d/*nvidia* \
  && pip install --no-cache-dir --no-deps \
       "omnivoice @ git+https://github.com/k2-fsa/OmniVoice.git@08be0b4ccbac3e13e374e86fbfead4b4cac343e2" \
       "qwen-tts==0.1.1" \
+ && python3 -c "import importlib.metadata as m, pathlib; \
+p = pathlib.Path(m.distribution('qwen-tts').locate_file('qwen_tts/core/tokenizer_12hz')); \
+(p / '__init__.py').touch(); print('qwen-tts 12hz: added missing __init__.py')" \
  && pip install --no-cache-dir pydub num2words accelerate \
  && pip install --no-cache-dir --no-deps -e . \
  && python3 -c "import omnivoice.models.omnivoice_flashinfer as fi; \
