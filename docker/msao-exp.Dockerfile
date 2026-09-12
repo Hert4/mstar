@@ -53,6 +53,11 @@ WORKDIR /opt/mstar
 #     exclude the base's 2.13.0, and a resolve would downgrade torch and break
 #     flashinfer's ABI, defeating the reason for choosing this base. torchaudio,
 #     soundfile and torchcodec are already present, built against that torch.
+#   - qwen-tts, for the Qwen3-TTS 12 Hz codec. --no-deps is required, not
+#     just preferred: its metadata pins transformers==4.57.3 against the
+#     base's 5.12.1. Only the files are needed — qwen3_tts_model loads the
+#     two tokenizer_12hz sources directly under a private package name so
+#     the package's own __init__ (which drags in pysox) never runs.
 #   - accelerate, which is NOT optional despite --no-deps. transformers'
 #     from_pretrained calls check_and_set_device_map(), and that raises as
 #     soon as a torch device context is active -- which it is, because the
@@ -67,13 +72,17 @@ RUN rm -f /etc/apt/sources.list.d/*cuda* /etc/apt/sources.list.d/*nvidia* \
  && rm -rf /var/lib/apt/lists/* \
  && pip install --no-cache-dir --no-deps \
       "omnivoice @ git+https://github.com/k2-fsa/OmniVoice.git@08be0b4ccbac3e13e374e86fbfead4b4cac343e2" \
+      "qwen-tts==0.1.1" \
  && pip install --no-cache-dir pydub num2words accelerate \
  && pip install --no-cache-dir --no-deps -e . \
  && python3 -c "import omnivoice.models.omnivoice_flashinfer as fi; \
 [getattr(fi, n) for n in ('_CTX','PackedAttnRunner','_forward_logits','apply_flashinfer')]; \
 print('omnivoice + flashinfer surface ok')" \
  && python3 -c "from mstar.model.registry import get_model_class; \
-print('registry:', get_model_class('omnivoice').__name__)" \
+print('registry:', get_model_class('omnivoice').__name__, get_model_class('qwen3_tts').__name__, get_model_class('qwen3_asr').__name__)" \
+ && python3 -c "import importlib.metadata as m, pathlib; \
+p = pathlib.Path(m.distribution('qwen-tts').locate_file('qwen_tts/core/tokenizer_12hz')); \
+assert (p / '__init__.py').is_file(), p; print('qwen-tts 12hz codec sources ok')" \
  && python3 -c "from mstar.model.omnivoice.components.backbone import assert_flashinfer_api; \
 assert_flashinfer_api(); print('backbone api guard ok')" \
  && python3 -c "import torch; assert torch.__version__.startswith('2.13.'), torch.__version__; \
