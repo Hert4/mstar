@@ -356,13 +356,20 @@ class Qwen3ASRModel(Model):
             raw_audio_inputs[0].cpu().numpy(),
             sampling_rate=self.feature_extractor.sampling_rate,
             return_attention_mask=True,
-            padding="max_length",
+            # ``padding=True`` (longest) and no truncation, matching the
+            # reference processor (vllm Qwen3ASRProcessor.__call__). Not
+            # ``max_length``: that zero-pads the *waveform* to 30 s before
+            # the STFT, so the frames straddling the end of the real audio
+            # see the padding. Measured max 0.0055 absolute difference in
+            # the mel features against this path — small, but it lands on
+            # a greedy argmax and flips near-tied tokens.
+            padding=True,
+            truncation=False,
             return_tensors="pt",
         )
-        # The extractor pads to the fixed 30 s window; trim back to the real
-        # frames. Keeping the padding would put the model back where Whisper
-        # is — paying for 30 s of audio that is not there — and would also
-        # make the placeholder count wrong.
+        # Trim to the real frames anyway: the model must pay for the audio
+        # that is there and no more, and the placeholder count is derived
+        # from this number.
         mask = feat.get("attention_mask")
         frames = int(mask[0].sum()) if mask is not None else feat["input_features"].shape[-1]
         audio_features = feat["input_features"][0][:, :frames]
