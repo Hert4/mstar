@@ -64,9 +64,20 @@ MAX_SEQ_LEN = 1024
 
 
 class Qwen3ASRModel(Model):
-    def __init__(self, model_path: str | None = None, cache_dir: str | None = None):
+    def __init__(
+        self,
+        model_path_hf: str = "Qwen/Qwen3-ASR-0.6B",
+        cache_dir: str | None = None,
+        model_dir: str | None = None,
+        **kwargs,
+    ):
+        """``model_dir`` is a local checkpoint directory, from the config
+        YAML's ``model_kwargs``. It wins over ``model_path_hf`` so an
+        air-gapped deployment can point at a staged copy without the Hub."""
         super().__init__()
-        self.local_dir = self._resolve_dir(model_path, cache_dir)
+        self.model_path_hf = model_path_hf
+        self.cache_dir = cache_dir
+        self.local_dir = self._resolve_dir(model_dir or model_path_hf, cache_dir)
         self.config = Qwen3ASRModelConfig.from_pretrained(self.local_dir)
 
         from transformers import AutoFeatureExtractor, AutoTokenizer
@@ -83,14 +94,12 @@ class Qwen3ASRModel(Model):
         self._prompt_cache: dict[tuple[str, int], list[int]] = {}
 
     @staticmethod
-    def _resolve_dir(model_path: str | None, cache_dir: str | None) -> str:
-        if model_path and Path(model_path).exists():
+    def _resolve_dir(model_path: str, cache_dir: str | None) -> str:
+        if Path(model_path).exists():
             return model_path
         from huggingface_hub import snapshot_download
 
-        return snapshot_download(
-            repo_id=model_path or "Qwen/Qwen3-ASR-0.6B", cache_dir=cache_dir,
-        )
+        return snapshot_download(repo_id=model_path, cache_dir=cache_dir)
 
     # -------------------------------------------------------------------
     # Model ABC: resources
