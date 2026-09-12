@@ -91,6 +91,64 @@ class WhisperEncoderSubmodule(NodeSubmodule):
         encoder_states = self.audio_encoder(feats).last_hidden_state.squeeze(0)
         return {"encoder_states": [encoder_states]}
 
+    # The encoder window is fixed: ``process_prompt`` pads or truncates every
+    # clip to 30 s, so a row is always (num_mel_bins, 3000) and a batch always
+    # stacks. Nothing here is sequence-length dependent, which is what makes
+    # the three overrides below safe to answer unconditionally.
+    #
+    # Without them the base class applies: ``can_batch`` is False and the
+    # default ``preprocess`` raises on more than one input, so the node ran one
+    # request per forward — 1500 encoder positions at batch 1, once per
+    # request. That cost never amortised, and because a request only reaches
+    # the decoder after its own encoder pass, it also paced arrivals into the
+    # decode loop: requests entered ~one per encoder pass, so the decode batch
+    # could not fill either. Measured at concurrency 16, decode averaged 2.3
+    # requests of a possible 16.
+    MAX_BATCH_SIZE = 16
+
+    def can_batch(
+        self, batch: ExecutingBatch,
+        model_inputs: list[NodeInputs],
+    ) -> bool:
+        return True
+
+    def max_batch_size(self, graph_walk: str) -> int | None:
+        del graph_walk
+        return self.MAX_BATCH_SIZE
+
+    def preprocess(
+        self,
+        graph_walk: str,
+        engine_inputs: ModelInputsFromEngine,
+        inputs: list[NodeInputs],
+    ) -> dict:
+        del graph_walk, engine_inputs
+        return {
+            "audio_features": torch.stack(
+                [inp.tensor_inputs["audio_features"] for inp in inputs]
+            ),
+        }
+
+    def forward_batched(
+        self,
+        graph_walk: str,
+        engine_inputs: ModelInputsFromEngine,
+        audio_features: torch.Tensor,
+        **kwargs,
+    ) -> dict[str, NameToTensorList]:
+        del graph_walk
+        device = self.get_device()
+        dtype = next(self.audio_encoder.parameters()).dtype
+        feats = audio_features.to(device=device, dtype=dtype)
+        if feats.dim() == 2:
+            feats = feats.unsqueeze(0)
+        # (B, max_source_positions, d_model); the decoder wants one row each
+        states = self.audio_encoder(feats).last_hidden_state
+        return {
+            rid: {"encoder_states": [states[i]]}
+            for i, rid in enumerate(engine_inputs.request_ids)
+        }
+
 
 # ===================================================================
 # 2. WhisperDecoderSubmodule

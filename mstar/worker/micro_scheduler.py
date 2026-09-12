@@ -1,6 +1,7 @@
 import logging
+import os
 import time
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass
 from enum import Enum
 
@@ -12,6 +13,12 @@ from mstar.worker.engine_manager import EngineManager
 from mstar.worker.node_manager_utils import WorkerGraphsManager
 
 logger = logging.getLogger(__name__)
+
+# Per-(node, walk) batch-size and ready-count tally; see `record_pick`. Off by
+# default — it answers "is this walk batching, and was there anything to batch"
+# during a tuning pass, and costs a dict update per scheduling decision.
+_SCHED_STATS = os.environ.get("MSTAR_SCHED_STATS", "0") == "1"
+_SCHED_STATS_EVERY_S = float(os.environ.get("MSTAR_SCHED_STATS_INTERVAL", "5"))
 
 
 @dataclass
@@ -145,6 +152,9 @@ class MicroScheduler:
         self.node_and_walk_to_last_batch_num = {}
         # (node, walk) -> consecutive picks lost on priority alone
         self._priority_skips: dict[tuple[str, str], int] = {}
+        # (node, walk, source) -> batch-size/ready tally; see `record_pick`
+        self._pick_stats: dict[tuple[str, str, str], dict] = {}
+        self._pick_stats_at = time.monotonic()
         # request_id -> monotonic time until which the request is held
         self.held_until: dict[str, float] = {}
         # Rids with a deferred remove; stop initiating new work for them.
@@ -323,6 +333,14 @@ class MicroScheduler:
             pre_existing_batch_size=pre_existing_batch_size
         )
         if sched_from_backlog is not None:
+            # ready == bs here: a backlog chunk is what is left of an already
+            # assembled set, so there is no wider pool it could have drawn on.
+            self.record_pick(
+                sched_from_backlog.node_name, sched_from_backlog.graph_walk,
+                len(sched_from_backlog.node_objects),
+                ready=len(sched_from_backlog.node_objects),
+                source="backlog",
+            )
             return sched_from_backlog
 
         if target is not None:
@@ -414,7 +432,57 @@ class MicroScheduler:
 
         # Everything past the first step is already popped off the queues, so
         # it has to be remembered here or it would never run.
-        return self._cap_batch_and_schedule(batch=full_batch, max_bs=remaining)
+        scheduled = self._cap_batch_and_schedule(batch=full_batch, max_bs=remaining)
+        if scheduled is not None:
+            self.record_pick(
+                best_node_name, graph_walk, len(scheduled.node_objects),
+                ready=len(entries),
+                source="targeted" if target is not None else "scan",
+            )
+        return scheduled
+
+    def record_pick(
+        self, node_name: str, graph_walk: str, bs: int, ready: int,
+        source: str,
+    ) -> None:
+        """Tally one scheduling decision, under ``MSTAR_SCHED_STATS=1``.
+
+        A batch of 1 is ambiguous three ways — the scheduler capped it, only
+        one request was ready, or a targeted call pinned it — and telling
+        them apart is the difference between "batching is off" and "nothing
+        to batch". So ``ready`` (how many were available for this walk) and
+        ``source`` travel with the size.
+
+        Aggregated and flushed on an interval rather than logged per step:
+        a saturated decode loop schedules hundreds of steps a second, and a
+        line each would cost more than it measures.
+        """
+        if not _SCHED_STATS:
+            return
+        key = (node_name, graph_walk, source)
+        stat = self._pick_stats.setdefault(
+            key, {"n": 0, "bs": 0, "ready": 0, "bs_max": 0, "hist": Counter()}
+        )
+        stat["n"] += 1
+        stat["bs"] += bs
+        stat["ready"] += ready
+        stat["bs_max"] = max(stat["bs_max"], bs)
+        stat["hist"][bs] += 1
+        now = time.monotonic()
+        if now - self._pick_stats_at < _SCHED_STATS_EVERY_S:
+            return
+        self._pick_stats_at = now
+        for (node, walk, src), s in sorted(self._pick_stats.items()):
+            hist = " ".join(
+                f"{size}x{count}" for size, count in sorted(s["hist"].items())
+            )
+            logger.info(
+                "sched stats %s/%s via %s: steps=%d avg_bs=%.2f max_bs=%d "
+                "avg_ready=%.2f  bs_hist[%s]",
+                node, walk, src, s["n"], s["bs"] / s["n"], s["bs_max"],
+                s["ready"] / s["n"], hist,
+            )
+        self._pick_stats.clear()
 
     @staticmethod
     def _remaining_capacity(
