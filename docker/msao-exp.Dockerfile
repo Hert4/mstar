@@ -102,8 +102,12 @@ t = t.replace('@check_model_inputs()', '@check_model_inputs'); \
 anchor = 'from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update'; \
 assert anchor in t, 'rope import not found; check the wheel'; \
 t = t.replace(anchor, anchor + chr(10) + open('/opt/mstar/docker/qwen_tts_rope_default.py').read()); \
+mask_old = chr(10).join(['                \"input_embeds\": inputs_embeds,', '                \"attention_mask\": attention_mask,', '                \"cache_position\": cache_position,']) + chr(10); \
+mask_new = chr(10).join(['                \"inputs_embeds\": inputs_embeds,', '                \"attention_mask\": attention_mask,']) + chr(10); \
+assert mask_old in t, 'mask kwargs block not found; check the wheel'; \
+t = t.replace(mask_old, mask_new); \
 f.write_text(t); \
-print('qwen-tts 12hz: __init__.py added, decorator and rope default adapted')" \
+print('qwen-tts 12hz: __init__.py, decorator, rope default and mask kwargs adapted')" \
  && pip install --no-cache-dir pydub num2words accelerate \
  && pip install --no-cache-dir --no-deps -e . \
  && python3 -c "import omnivoice.models.omnivoice_flashinfer as fi; \
@@ -111,10 +115,7 @@ print('qwen-tts 12hz: __init__.py added, decorator and rope default adapted')" \
 print('omnivoice + flashinfer surface ok')" \
  && python3 -c "from mstar.model.registry import get_model_class; \
 print('registry:', get_model_class('omnivoice').__name__, get_model_class('qwen3_tts').__name__, get_model_class('qwen3_asr').__name__)" \
- && python3 -c "from mstar.model.qwen3_tts.qwen3_tts_model import _load_qwen3_tts_decoder_classes as L; \
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS as R; \
-cls = L(); assert 'default' in R, sorted(R); \
-print('qwen-tts 12hz codec loads:', [c.__name__ for c in cls], '| rope default registered')" \
+ && python3 docker/qwen_tts_smoke.py \
  && python3 -c "from mstar.model.omnivoice.components.backbone import assert_flashinfer_api; \
 assert_flashinfer_api(); print('backbone api guard ok')" \
  && python3 -c "import torch; assert torch.__version__.startswith('2.13.'), torch.__version__; \
