@@ -71,6 +71,13 @@ WORKDIR /opt/mstar
 #     `@check_model_inputs` restores the 4.57 default behaviour under the
 #     5.x API. The guard below then loads the classes through M*'s own
 #     loader, i.e. the exact path that failed at serving time.
+#
+#     Same story one layer down: the codec's rotary embedding looks up
+#     ROPE_INIT_FUNCTIONS['default'], a key 5.x no longer registers (it
+#     dropped _compute_default_rope_parameters outright). The shim
+#     re-registers it with the textbook definition, inv_freq =
+#     1 / base**(2i/d) with unit scaling — that is what 'default' always
+#     meant, not a reconstruction of anything version-specific.
 #   - accelerate, which is NOT optional despite --no-deps. transformers'
 #     from_pretrained calls check_and_set_device_map(), and that raises as
 #     soon as a torch device context is active -- which it is, because the
@@ -91,8 +98,12 @@ p = pathlib.Path(m.distribution('qwen-tts').locate_file('qwen_tts/core/tokenizer
 (p / '__init__.py').touch(); \
 f = p / 'modeling_qwen3_tts_tokenizer_v2.py'; t = f.read_text(); \
 assert '@check_model_inputs()' in t, 'decorator call not found; check the wheel'; \
-f.write_text(t.replace('@check_model_inputs()', '@check_model_inputs')); \
-print('qwen-tts 12hz: __init__.py added, check_model_inputs adapted')" \
+t = t.replace('@check_model_inputs()', '@check_model_inputs'); \
+anchor = 'from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update'; \
+assert anchor in t, 'rope import not found; check the wheel'; \
+t = t.replace(anchor, anchor + chr(10) + open('/opt/mstar/docker/qwen_tts_rope_default.py').read()); \
+f.write_text(t); \
+print('qwen-tts 12hz: __init__.py added, decorator and rope default adapted')" \
  && pip install --no-cache-dir pydub num2words accelerate \
  && pip install --no-cache-dir --no-deps -e . \
  && python3 -c "import omnivoice.models.omnivoice_flashinfer as fi; \
@@ -101,7 +112,9 @@ print('omnivoice + flashinfer surface ok')" \
  && python3 -c "from mstar.model.registry import get_model_class; \
 print('registry:', get_model_class('omnivoice').__name__, get_model_class('qwen3_tts').__name__, get_model_class('qwen3_asr').__name__)" \
  && python3 -c "from mstar.model.qwen3_tts.qwen3_tts_model import _load_qwen3_tts_decoder_classes as L; \
-print('qwen-tts 12hz codec loads:', [c.__name__ for c in L()])" \
+from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS as R; \
+cls = L(); assert 'default' in R, sorted(R); \
+print('qwen-tts 12hz codec loads:', [c.__name__ for c in cls], '| rope default registered')" \
  && python3 -c "from mstar.model.omnivoice.components.backbone import assert_flashinfer_api; \
 assert_flashinfer_api(); print('backbone api guard ok')" \
  && python3 -c "import torch; assert torch.__version__.startswith('2.13.'), torch.__version__; \
