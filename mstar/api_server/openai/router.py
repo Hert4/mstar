@@ -7,9 +7,11 @@ the surface is supported, and delegates to a serving handler. The native
 
 from __future__ import annotations
 
+import base64
 import json
 
 from fastapi import APIRouter, Request
+from pydantic import ValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from mstar.api_server.openai import (
@@ -97,8 +99,44 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
     return JSONResponse(result)
 
 
+async def _speech_request(raw_request: Request) -> SpeechRequest:
+    """Build a SpeechRequest from either a JSON body or a multipart form.
+
+    The JSON body is the OpenAI shape. Multipart is accepted too because this
+    endpoint takes an audio file: ``-F ref_audio=@voice.wav`` beats pasting a
+    200KB data URL into the body, and it matches how OpenAI's own audio
+    endpoints that carry a file (transcriptions, translations) are called.
+    An uploaded file is folded into the data URL the adapter already resolves.
+    """
+    ctype = raw_request.headers.get("content-type", "")
+    if not ctype.startswith("multipart/form-data"):
+        return SpeechRequest.model_validate(await raw_request.json())
+
+    form = await raw_request.form()
+    data: dict = {}
+    for key, value in form.multi_items():
+        if hasattr(value, "read"):
+            raw = await value.read()
+            if not raw:
+                continue
+            mime = getattr(value, "content_type", None) or "audio/wav"
+            data[key] = f"data:{mime};base64,{base64.b64encode(raw).decode()}"
+        else:
+            data[key] = value
+    return SpeechRequest.model_validate(data)
+
+
 @router.post("/v1/audio/speech")
-async def audio_speech(request: SpeechRequest, raw_request: Request):
+async def audio_speech(raw_request: Request):
+    try:
+        request = await _speech_request(raw_request)
+    except ValidationError as e:
+        detail = "; ".join(
+            f"{'.'.join(str(x) for x in err['loc'])}: {err['msg']}" for err in e.errors()
+        )
+        return _error(422, detail or str(e), "invalid_request_error")
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
+        return _error(400, f"malformed request body: {e}", "invalid_request_error")
     api, model_name, adapter, err = _resolve("supports_speech")
     if err is not None:
         return err
