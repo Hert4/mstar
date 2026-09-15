@@ -1,0 +1,23 @@
+mstar/api_server/openai/protocol.py
+  s_6a1513f46bf006::t_9c3c4881df3da3 46-54,58
+mstar/api_server/openai/router.py
+  s_6a1513f46bf006::t_d6c3eeb57a828e 123-128,150-154
+mstar/api_server/openai/serving_speech.py
+  s_6a1513f46bf006::t_c2a2117103fb98 10-15,21-80,82-86
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "c583debb655d421ec4b200c40d4a29281b0bbb77",
+  "prompts": {},
+  "sessions": {
+    "s_6a1513f46bf006": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ac6e8ce3-5474-420e-bfcf-bf8da9e52dfa",
+        "model": "claude-opus-5"
+      },
+      "human_author": "tmduc3 <tmduc3@rd.misa.com.vn>"
+    }
+  }
+}
