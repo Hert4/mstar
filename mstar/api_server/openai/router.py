@@ -99,6 +99,71 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
     return JSONResponse(result)
 
 
+# ---------------------------------------------------------------------------
+# Compatibility with the in-house TTS wrapper this endpoint replaces.
+#
+# That service speaks its own multipart dialect -- `text` / `texts`,
+# `encode_type`, `voice_type`, ISO language codes -- and there are clients in
+# production written against it. Accepting its spelling costs one dict and one
+# function here, and lets those clients change only the URL. The OpenAI names
+# stay canonical: if both are present the OpenAI one wins.
+# ---------------------------------------------------------------------------
+
+# The wrapper sends ISO codes; OmniVoice is prompted with the language's name
+# (it goes into the prompt verbatim as <|lang_start|>...<|lang_end|>, so an
+# unknown code would be passed through to the model as-is and quietly skew the
+# voice). Same mapping the ASR model uses for its own `language` field.
+_WRAPPER_LANG = {
+    "vi": "Vietnamese", "en": "English", "zh": "Chinese", "yue": "Cantonese",
+    "ja": "Japanese", "ko": "Korean", "th": "Thai", "ar": "Arabic",
+    "fr": "French", "de": "German", "es": "Spanish", "it": "Italian",
+    "pt": "Portuguese", "ru": "Russian", "id": "Indonesian", "ms": "Malay",
+    "hi": "Hindi", "tr": "Turkish", "nl": "Dutch", "pl": "Polish",
+}
+
+_WRAPPER_ALIASES = {"text": "input", "encode_type": "response_format"}
+
+
+def _apply_wrapper_aliases(data: dict) -> dict:
+    """Translate the wrapper's field names in place. OpenAI names take priority."""
+    for old, new in _WRAPPER_ALIASES.items():
+        if old in data and new not in data:
+            data[new] = data.pop(old)
+        else:
+            data.pop(old, None)
+
+    # Deliberately NOT aliased to `voice`. The wrapper's voice_type names a
+    # preset in its own ref_voices/ directory; this server has no such registry
+    # and `voice` is a free-text description of a voice to design. Feeding a
+    # preset's name in as a description returns a different voice and no error,
+    # so say what is wrong instead.
+    if data.pop("voice_type", None):
+        raise ValueError(
+            "voice_type names a preset this server does not have. Clone a voice "
+            "with ref_audio (a file, data URL, path or URL), or describe one "
+            "with voice."
+        )
+
+    # `texts` is a JSON array of strings in one field, which is how the wrapper
+    # spells a batch. Bad JSON here is the caller's mistake, so let it surface
+    # as a 400 rather than silently synthesising the literal string.
+    if "texts" in data:
+        raw = data.pop("texts")
+        if "input" not in data:
+            if isinstance(raw, str):
+                parsed = json.loads(raw)
+                if not isinstance(parsed, list):
+                    raise ValueError("texts must be a JSON array of strings")
+                data["input"] = parsed
+            else:
+                data["input"] = raw
+
+    lang = data.get("language")
+    if isinstance(lang, str) and lang.lower() in _WRAPPER_LANG:
+        data["language"] = _WRAPPER_LANG[lang.lower()]
+    return data
+
+
 async def _speech_request(raw_request: Request) -> SpeechRequest:
     """Build a SpeechRequest from either a JSON body or a multipart form.
 
@@ -110,7 +175,10 @@ async def _speech_request(raw_request: Request) -> SpeechRequest:
     """
     ctype = raw_request.headers.get("content-type", "")
     if not ctype.startswith("multipart/form-data"):
-        return SpeechRequest.model_validate(await raw_request.json())
+        body = await raw_request.json()
+        if not isinstance(body, dict):
+            raise ValueError("request body must be a JSON object")
+        return SpeechRequest.model_validate(_apply_wrapper_aliases(body))
 
     form = await raw_request.form()
     data: dict = {}
@@ -128,7 +196,7 @@ async def _speech_request(raw_request: Request) -> SpeechRequest:
             data[key] = [*prev, value] if isinstance(prev, list) else [prev, value]
         else:
             data[key] = value
-    return SpeechRequest.model_validate(data)
+    return SpeechRequest.model_validate(_apply_wrapper_aliases(data))
 
 
 @router.post("/v1/audio/speech")
