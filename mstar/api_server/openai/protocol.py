@@ -43,11 +43,19 @@ class ChatCompletionRequest(BaseModel):
 
 
 class SpeechRequest(BaseModel):
-    """OpenAI ``/v1/audio/speech`` (text-to-speech)."""
+    """OpenAI ``/v1/audio/speech`` (text-to-speech).
+
+    ``input`` takes one string or a list of them. The list form mirrors
+    ``/v1/embeddings``, which has always accepted both: one string returns the
+    audio bytes, a list returns JSON with one ``data`` entry per item, carrying
+    its ``index``. Items are submitted together so the scheduler can put them
+    in one batch -- that, not a separate route, is where the throughput comes
+    from.
+    """
 
     model_config = _CFG
 
-    input: str
+    input: str | list[str]
     model: str | None = None
     voice: str | None = None
     response_format: str = "wav"

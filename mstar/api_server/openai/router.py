@@ -120,7 +120,12 @@ async def _speech_request(raw_request: Request) -> SpeechRequest:
             if not raw:
                 continue
             mime = getattr(value, "content_type", None) or "audio/wav"
-            data[key] = f"data:{mime};base64,{base64.b64encode(raw).decode()}"
+            value = f"data:{mime};base64,{base64.b64encode(raw).decode()}"
+        # A repeated field is a list, so `-F input=one -F input=two` is the
+        # multipart spelling of the JSON list form.
+        if key in data:
+            prev = data[key]
+            data[key] = [*prev, value] if isinstance(prev, list) else [prev, value]
         else:
             data[key] = value
     return SpeechRequest.model_validate(data)
@@ -142,8 +147,11 @@ async def audio_speech(raw_request: Request):
         return err
     try:
         return await serving_speech.create_speech(api, model_name, adapter, request, raw_request)
-    except Exception as e:  # noqa: BLE001
-        return _error(getattr(e, "status_code", 500), str(getattr(e, "detail", e)), "server_error")
+    except Exception as e:  # noqa: BLE001 — surface as an OpenAI error envelope
+        default_status = 400 if isinstance(e, (ValueError, TypeError)) else 500
+        status = getattr(e, "status_code", default_status)
+        kind = "invalid_request_error" if status < 500 else "server_error"
+        return _error(status, str(getattr(e, "detail", e)), kind)
 
 
 @router.post("/v1/images/generations")
