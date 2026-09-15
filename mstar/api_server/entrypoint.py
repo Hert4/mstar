@@ -17,6 +17,8 @@ from typing import Any, Optional
 
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
@@ -696,6 +698,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# FastAPI's default validation handler echoes the offending body back through
+# ``jsonable_encoder``, which decodes bytes as UTF-8. A multipart upload sent to
+# a JSON route puts raw binary in that field, so the handler itself raises
+# UnicodeDecodeError and the client gets a 500 with a traceback instead of the
+# 422 that says what was actually wrong. Drop the echoed input.
+@app.exception_handler(RequestValidationError)
+async def _validation_error(request: Request, exc: RequestValidationError):
+    errors = [{k: v for k, v in e.items() if k != "input"} for e in exc.errors()]
+    return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
 
 api_server: APIServer | None = None
 
