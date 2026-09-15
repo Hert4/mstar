@@ -57,6 +57,15 @@ async def _create_speech_batch(api, model_name, adapter, req, raw_request, fmt, 
     if req.stream:
         raise ValueError("stream is not supported with a list input; send one string to stream")
 
+    # One reference voice covers the whole list, so resolve it once. Left to
+    # the per-item path it would be decoded and written to upload_dir once per
+    # item -- sixteen copies of the same WAV for a sixteen-line batch. A local
+    # path resolves to itself, so the items below just reuse this one.
+    ref = (req.model_extra or {}).get("ref_audio")
+    if isinstance(ref, str) and ref:
+        _mod, ref_path = media_io.resolve_media_ref(ref, api.upload_dir, allow_remote=True)
+        req = req.model_copy(update={"ref_audio": ref_path})
+
     started = time.monotonic()
     # Submit all, then await all: the whole point of the list form.
     pending = [await _one(api, adapter, req, t, fmt, sample_rate, raw_request) for t in texts]
