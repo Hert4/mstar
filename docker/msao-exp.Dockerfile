@@ -47,8 +47,21 @@ WORKDIR /opt/mstar
 #   - ffmpeg, which backs pydub for the reference's silence trim on the decode tail
 #   - omnivoice from git at a pinned commit, NOT PyPI: the published 0.2.1 wheel
 #     does not carry omnivoice/models/omnivoice_flashinfer.py, the packed
-#     fused-attention path this integration is built on. The pin is the exact
-#     tree the port was written and reviewed against.
+#     fused-attention path this integration is built on.
+#
+#     The source is shashank14k's fork rather than k2-fsa upstream, for one
+#     file: its omnivoice_flashinfer.py adds a fused residual+RMSNorm model
+#     forward. Instead of per-layer `residual += x` followed by a separate
+#     RMSNorm, it calls flashinfer.norm.fused_add_rmsnorm, so each of the two
+#     fusion points per layer costs one pass over the hidden states instead of
+#     two, and the final model norm folds into the last layer. Diffed against
+#     upstream at 08be0b4c: 48 files, that one differs, so this pin buys the
+#     fused forward and nothing else.
+#
+#     Pinned to a commit, not a bare branch URL. mstar-dqdung:20260915-r5
+#     installed this fork without a pin while its comment claimed one, which
+#     means that image cannot be rebuilt into the same thing; the commit below
+#     is the one it actually resolved to, recovered from its direct_url.json.
 #   - --no-deps throughout: mstar and omnivoice both pin torch ranges that
 #     exclude the base's 2.13.0, and a resolve would downgrade torch and break
 #     flashinfer's ABI, defeating the reason for choosing this base. torchaudio,
@@ -91,7 +104,7 @@ RUN rm -f /etc/apt/sources.list.d/*cuda* /etc/apt/sources.list.d/*nvidia* \
  && apt-get install -y --no-install-recommends ffmpeg \
  && rm -rf /var/lib/apt/lists/* \
  && pip install --no-cache-dir --no-deps \
-      "omnivoice @ git+https://github.com/k2-fsa/OmniVoice.git@08be0b4ccbac3e13e374e86fbfead4b4cac343e2" \
+      "omnivoice @ git+https://github.com/shashank14k/OmniVoice.git@fb43f5bc7bf3390d7e60f2fb8cdda0d256fc3e98" \
       "qwen-tts==0.1.1" \
  && python3 -c "import importlib.metadata as m, pathlib; \
 p = pathlib.Path(m.distribution('qwen-tts').locate_file('qwen_tts/core/tokenizer_12hz')); \
@@ -113,6 +126,13 @@ print('qwen-tts 12hz: __init__.py, decorator, rope default and mask kwargs adapt
  && python3 -c "import omnivoice.models.omnivoice_flashinfer as fi; \
 [getattr(fi, n) for n in ('_CTX','PackedAttnRunner','_forward_logits','apply_flashinfer')]; \
 print('omnivoice + flashinfer surface ok')" \
+ && python3 -c "import inspect, omnivoice.models.omnivoice_flashinfer as fi; \
+[getattr(fi, n) for n in ('_fi_fused_model_forward','_patch_residual_rmsnorm')]; \
+p = inspect.signature(fi.apply_flashinfer).parameters['fuse_residual_rmsnorm']; \
+assert p.default is True, 'fuse_residual_rmsnorm no longer defaults on'; \
+src = inspect.getsource(fi._fi_fused_model_forward); \
+assert 'fused_add_rmsnorm' in src, 'fused forward no longer calls fused_add_rmsnorm'; \
+print('fused residual+rmsnorm forward ok')" \
  && python3 -c "from mstar.model.registry import get_model_class; \
 print('registry:', get_model_class('omnivoice').__name__, get_model_class('qwen3_tts').__name__, get_model_class('qwen3_asr').__name__)" \
  && python3 docker/qwen_tts_smoke.py \
