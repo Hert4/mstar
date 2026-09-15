@@ -31,6 +31,7 @@ vision-language-action policies, and world models — through a **Python SDK**, 
 
    serving
    clients
+   omnivoice-speech
 
 .. toctree::
    :maxdepth: 2
