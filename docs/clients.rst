@@ -242,11 +242,13 @@ Clone a voice
      -F "language=Vietnamese" \
      -F "input=This line is read in the cloned voice." \
      -F "ref_audio=@reference.wav" \
+     -F "ref_text=exactly what is said in reference.wav" \
      -o cloned.wav
 
-``ref_text`` is optional -- without it the reference is transcribed with Whisper. Supply
-it when you already have the transcript and want to skip that step, or when the automatic
-transcript comes out wrong.
+``ref_text`` is **required** whenever ``ref_audio`` is present, and must be the
+reference's actual transcript. Upstream OmniVoice falls back to transcribing it with
+Whisper; that is a second model on the serving path and a second way to fail, so it is
+not served here -- ``ref_audio`` without ``ref_text`` returns ``400``.
 
 In JSON, ``ref_audio`` takes a data URL, a bare base64 blob, a path the *server* can read,
 or an ``http(s)`` URL:
@@ -256,7 +258,8 @@ or an ``http(s)`` URL:
    curl -X POST "$BASE/v1/audio/speech" \
      -H "Content-Type: application/json" \
      -d '{"model":"omnivoice","input":"Xin chào.","language":"Vietnamese",
-          "ref_audio":"/data/voices/reference.wav"}' \
+          "ref_audio":"/data/voices/reference.wav",
+          "ref_text":"exactly what is said in reference.wav"}' \
      -o cloned.wav
 
 A batch
@@ -300,6 +303,7 @@ One ``ref_audio`` covers the whole list; it is decoded once, not once per line.
      -F "model=omnivoice" \
      -F "language=Vietnamese" \
      -F "ref_audio=@reference.wav" \
+     -F "ref_text=exactly what is said in reference.wav" \
      -F "input=Line one." \
      -F "input=Line two." \
      -o batch.json
@@ -337,7 +341,8 @@ Fields
        the server can read, or an ``http(s)`` URL.
    * - ``ref_text``
      - —
-     - Transcript of ``ref_audio``. Optional; Whisper transcribes it otherwise.
+     - Transcript of ``ref_audio``, and **required** with it. Auto-transcription
+       is not served, so a reference without its text is a ``400``.
    * - ``voice``
      - —
      - A *description* of a voice to design, not the name of a preset. There is
@@ -362,8 +367,9 @@ Errors
    * - Status
      - Cause
    * - ``400``
-     - A list longer than ``MSTAR_SPEECH_MAX_BATCH`` (16), ``stream`` with a
-       list, unparseable JSON, or ``voice_type`` (see below).
+     - ``ref_audio`` without ``ref_text``, a list longer than
+       ``MSTAR_SPEECH_MAX_BATCH`` (16), ``stream`` with a list, unparseable
+       JSON, or ``voice_type`` (see below).
    * - ``422``
      - The body parsed but a field is missing or the wrong type; the message
        names the field.
@@ -409,6 +415,7 @@ wins.
      -F "language=vi" \
      -F "encode_type=pcm" \
      -F "ref_audio=@reference.wav" \
+     -F "ref_text=exactly what is said in reference.wav" \
      -o batch.json
 
 One difference is deliberate. The wrapper's batch route concatenates every line into a

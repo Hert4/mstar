@@ -208,8 +208,12 @@ async def audio_speech(raw_request: Request):
             f"{'.'.join(str(x) for x in err['loc'])}: {err['msg']}" for err in e.errors()
         )
         return _error(422, detail or str(e), "invalid_request_error")
-    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
         return _error(400, f"malformed request body: {e}", "invalid_request_error")
+    except ValueError as e:
+        # A field the body cannot carry (voice_type, a texts that is not a list).
+        # The body parsed fine, so do not call it malformed.
+        return _error(400, str(e), "invalid_request_error")
     api, model_name, adapter, err = _resolve("supports_speech")
     if err is not None:
         return err
