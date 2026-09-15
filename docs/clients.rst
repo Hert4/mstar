@@ -162,8 +162,9 @@ Endpoints and model coverage:
      - ``bagel``, ``qwen3_omni``
      - Text chat (streaming + non-streaming). Qwen3-Omni can also emit speech.
    * - ``POST /v1/audio/speech``
-     - ``orpheus``, ``qwen3_omni``
-     - Text-to-speech.
+     - ``orpheus``, ``qwen3_omni``, ``omnivoice``
+     - Text-to-speech. OmniVoice also clones a voice and takes a batch; see
+       :ref:`omnivoice-speech`.
    * - ``POST /v1/images/generations``
      - ``bagel``
      - Text-to-image.
@@ -194,6 +195,224 @@ Per-model notes:
   ``Ethan``) and request audio output by including ``"audio"`` in ``modalities``.
   Non-OpenAI knobs (e.g. ``talker_top_k``, ``code_predictor_top_p``) go through
   ``extra_body``.
+- **OmniVoice** — clone a voice with ``ref_audio``, or design one by describing it in
+  ``voice``; synthesise several lines in one call by passing a list to ``input``. Full
+  reference below. ``temperature`` and ``top_p`` are deliberately not mapped: OmniVoice
+  ranks a whole canvas by confidence rather than sampling one token per position, so the
+  nearest knobs are ``class_temperature`` and ``position_temperature``, passed through
+  ``extra_body``.
 - **Orpheus** — set the speaker with ``voice`` — one of ``tara`` (default), ``zoe``,
   ``zac``, ``jess``, ``leo``, ``mia``, ``julia``, ``leah`` (the ``available_voices`` list
   in the Orpheus config).
+
+
+.. _omnivoice-speech:
+
+OmniVoice speech
+----------------
+
+Every example below is a complete ``curl``. Replace ``$BASE`` with the server root --
+on Run:AI that includes the project and workload, e.g.
+``https://runai.example/prod-ai-core-platform/misa-omnivoice-flash-api``.
+
+The endpoint takes **either JSON or multipart**. Multipart exists because this route
+carries a file: attaching a reference voice with ``-F ref_audio=@voice.wav`` beats
+base64-ing a WAV into a JSON string, and it is how OpenAI's own audio routes that take a
+file are called.
+
+One line
+~~~~~~~~
+
+.. code-block:: bash
+
+   curl -X POST "$BASE/v1/audio/speech" \
+     -H "Content-Type: application/json" \
+     -d '{"model":"omnivoice","input":"Xin chào.","language":"Vietnamese","response_format":"wav"}' \
+     -o out.wav
+
+Returns the audio bytes with the format's MIME type.
+
+Clone a voice
+~~~~~~~~~~~~~
+
+.. code-block:: bash
+
+   curl -X POST "$BASE/v1/audio/speech" \
+     -F "model=omnivoice" \
+     -F "language=Vietnamese" \
+     -F "input=This line is read in the cloned voice." \
+     -F "ref_audio=@reference.wav" \
+     -o cloned.wav
+
+``ref_text`` is optional -- without it the reference is transcribed with Whisper. Supply
+it when you already have the transcript and want to skip that step, or when the automatic
+transcript comes out wrong.
+
+In JSON, ``ref_audio`` takes a data URL, a bare base64 blob, a path the *server* can read,
+or an ``http(s)`` URL:
+
+.. code-block:: bash
+
+   curl -X POST "$BASE/v1/audio/speech" \
+     -H "Content-Type: application/json" \
+     -d '{"model":"omnivoice","input":"Xin chào.","language":"Vietnamese",
+          "ref_audio":"/data/voices/reference.wav"}' \
+     -o cloned.wav
+
+A batch
+~~~~~~~
+
+Pass a list to ``input`` (repeat the field in multipart). The items are submitted together
+so the scheduler can put them in one batch -- that is where the throughput comes from, and
+why there is no separate batch route.
+
+.. code-block:: bash
+
+   curl -X POST "$BASE/v1/audio/speech" \
+     -H "Content-Type: application/json" \
+     -d '{"model":"omnivoice","language":"Vietnamese","response_format":"wav",
+          "input":["Line one.","Line two.","Line three."]}' \
+     -o batch.json
+
+A list returns JSON rather than audio bytes, one entry per item, in order:
+
+.. code-block:: json
+
+   {"object":"list","model":"omnivoice","created":1789449600,"inference_time_s":2.1,
+    "data":[{"object":"audio.speech","index":0,"output_format":"wav","b64_json":"..."},
+            {"object":"audio.speech","index":1,"output_format":"wav","b64_json":"..."}]}
+
+.. code-block:: bash
+
+   python3 -c "
+   import json, base64
+   for it in json.load(open('batch.json'))['data']:
+       open(f\"line_{it['index']}.wav\", 'wb').write(base64.b64decode(it['b64_json']))"
+
+A batch in one voice
+~~~~~~~~~~~~~~~~~~~~
+
+One ``ref_audio`` covers the whole list; it is decoded once, not once per line.
+
+.. code-block:: bash
+
+   curl -X POST "$BASE/v1/audio/speech" \
+     -F "model=omnivoice" \
+     -F "language=Vietnamese" \
+     -F "ref_audio=@reference.wav" \
+     -F "input=Line one." \
+     -F "input=Line two." \
+     -o batch.json
+
+For a different voice per line, send separate requests.
+
+Fields
+~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 24 16 60
+
+   * - Field
+     - Default
+     - Meaning
+   * - ``input``
+     - —
+     - One string, or a list of them for a batch. Required.
+   * - ``language``
+     - —
+     - Goes into the prompt verbatim, so use the language's name
+       (``Vietnamese``), not a code. Not validated: an unrecognised value is
+       passed to the model and skews the voice with nothing in the response to
+       say so.
+   * - ``response_format``
+     - ``wav``
+     - ``wav`` and ``pcm`` are always available. ``flac``, ``ogg`` and ``mp3``
+       need the optional ``soundfile`` backend, and **fall back to WAV** if it
+       is missing -- check the response's content type rather than assuming.
+       ``pcm`` is headerless 16-bit at the model's sample rate.
+   * - ``ref_audio``
+     - —
+     - Reference voice to clone. Multipart file, data URL, bare base64, a path
+       the server can read, or an ``http(s)`` URL.
+   * - ``ref_text``
+     - —
+     - Transcript of ``ref_audio``. Optional; Whisper transcribes it otherwise.
+   * - ``voice``
+     - —
+     - A *description* of a voice to design, not the name of a preset. There is
+       no preset registry, so ``GET /v1/audio/voices`` does not exist.
+   * - ``speed``
+     - ``1.0``
+     - Playback rate.
+   * - ``seed``
+     - —
+     - Sampling seed. Without it, two identical requests return different audio.
+   * - ``stream``
+     - ``false``
+     - Streams a WAV. One string only; streaming a list is refused.
+
+Errors
+~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 10 90
+
+   * - Status
+     - Cause
+   * - ``400``
+     - A list longer than ``MSTAR_SPEECH_MAX_BATCH`` (16), ``stream`` with a
+       list, unparseable JSON, or ``voice_type`` (see below).
+   * - ``422``
+     - The body parsed but a field is missing or the wrong type; the message
+       names the field.
+
+Calling it like the in-house TTS wrapper
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Clients written against the internal TTS wrapper can keep their body and change only the
+URL. Its field names are accepted as aliases, and its two routes (``/inference`` and
+``/batch-inference``) both map onto this one. When both spellings appear, the OpenAI name
+wins.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 30 40
+
+   * - Wrapper
+     - Here
+     - Note
+   * - ``text``
+     - ``input``
+     -
+   * - ``texts``
+     - ``input`` (list)
+     - A JSON array in one field, as the wrapper sends it.
+   * - ``encode_type``
+     - ``response_format``
+     -
+   * - ``language=vi``
+     - ``language=Vietnamese``
+     - ISO codes are translated to the language's name.
+   * - ``voice_type``
+     - —
+     - **Rejected with 400.** It names a preset in the wrapper's own
+       ``ref_voices/`` directory, which this server does not have. Aliasing it
+       onto ``voice`` would return a different voice and no error, so it is
+       refused instead. Clone with ``ref_audio`` or describe with ``voice``.
+
+.. code-block:: bash
+
+   curl -X POST "$BASE/v1/audio/speech" \
+     -F 'texts=["Line one.","Line two."]' \
+     -F "language=vi" \
+     -F "encode_type=pcm" \
+     -F "ref_audio=@reference.wav" \
+     -o batch.json
+
+One difference is deliberate. The wrapper's batch route concatenates every line into a
+single audio stream with no boundaries, so the caller has to hunt for silence to split
+them -- which breaks on the first line containing a comma. A batch here returns one
+addressable entry per line, so that code goes away.
+
