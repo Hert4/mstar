@@ -1,0 +1,25 @@
+docs/models.rst
+  s_6a1513f46bf006::t_4e5941d7d4a49f 37-40,73-84
+mstar/cli/main.py
+  s_6a1513f46bf006::t_18a5db32bca3a0 34,112-114
+mstar/model/omnivoice/submodules.py
+  s_6a1513f46bf006::t_67f56ff5160358 25,209-212,244,246-249,251-267,297-298,301,303-309,312,315-316,320-370
+test/omnivoice/test_parity.py
+  s_6a1513f46bf006::t_971437b1e6dd66 47-52,370-420
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "76878401dee7ac9e7fb68a613848771e6f327370",
+  "prompts": {},
+  "sessions": {
+    "s_6a1513f46bf006": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ac6e8ce3-5474-420e-bfcf-bf8da9e52dfa",
+        "model": "claude-opus-5"
+      },
+      "human_author": "tmduc3 <tmduc3@rd.misa.com.vn>"
+    }
+  }
+}
