@@ -34,6 +34,10 @@ Registry keys live in ``mstar/model/registry.py`` (``MODEL_REGISTRY`` / ``HF_MOD
    * - ``pi05``
      - ``lerobot/pi05_base``
      - Pi0.5 vision-language-action robotics model (ViT encoder + LLM + flow action expert).
+   * - ``omnivoice``
+     - ``k2-fsa/OmniVoice``
+     - Massively multilingual zero-shot TTS: masked-diffusion canvas over a Qwen3-0.6B
+       backbone + audio codec. Clones a voice from a reference clip.
    * - ``qwen3_omni``
      - ``Qwen/Qwen3-Omni-30B-A3B-Instruct``
      - Omni-modal (text/image/audio/video in, text/audio out): Thinker + Talker + codec.
@@ -65,6 +69,18 @@ Notes
 - Some families accept multimodal input (image/audio/video); see the model's
   ``process_prompt`` for the inputs it expects.
 - To add a new family, see :doc:`adding_models`.
+
+OmniVoice notes
+~~~~~~~~~~~~~~~
+
+- Zero-shot only: there are no built-in speakers. Pass ``ref_audio`` with its
+  transcript in ``ref_text`` to clone a voice, or describe one in ``voice``.
+  ``ref_text`` is required alongside ``ref_audio``.
+- ``language`` is written into the prompt verbatim, so give the language's name
+  (``Vietnamese``), not an ISO code.
+- The backbone is not autoregressive: it fills a fixed canvas of eight codebook
+  rows over a few unmasking steps, so there is no KV cache and no per-token
+  sampling loop. Serve it with ``mstar serve omnivoice --gpus 0``.
 
 Qwen3-TTS notes
 ---------------

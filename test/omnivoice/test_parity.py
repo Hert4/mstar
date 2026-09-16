@@ -44,6 +44,12 @@ from mstar.model.omnivoice.components.unmask import (
     predict_tokens_with_scoring,
 )
 from mstar.model.omnivoice.config import OmniVoiceConfig
+from mstar.model.omnivoice.submodules import (
+    UNMASK_LOOP_NAME,
+    OmniVoiceBackboneSubmodule,
+)
+from mstar.model.submodule_base import NodeInputs
+from mstar.conductor.request_info import CurrentForwardPassInfo
 
 MODEL_PATH = os.environ.get("OMNIVOICE_PATH", "k2-fsa/OmniVoice")
 NUM_CODEBOOK = 8
@@ -361,3 +367,54 @@ def test_dense_agreement():
         f"only {agreement:.3f} of cells agree with the dense reference; "
         "below ~0.98 this is a porting bug, not kernel noise"
     )
+
+
+# ---------------------------------------------------------------------------
+# preprocess / postprocess split
+# ---------------------------------------------------------------------------
+
+
+def _fwd_info(request_id: str, iter_idx: int):
+    info = CurrentForwardPassInfo(
+        request_id=request_id, graph_walk="unmask", fwd_index=0,
+        random_seed=0, max_tokens=0,
+    )
+    info.step_metadata = dict(GREEDY)
+    info.dynamic_loop_iter_counts = {UNMASK_LOOP_NAME: iter_idx}
+    return info
+
+
+def test_postprocess_reveals_without_touching_the_loop_edge():
+    """``postprocess`` owns the reveal, and the edge it reads stays intact.
+
+    The canvas the engine routes in is the previous iteration's output edge.
+    ``apply_reveal`` writes in place, so the write has to land on a copy; if it
+    did not, the engine's own copy of that step's state would change under it.
+    """
+    target_len, vocab = 16, MASK_ID + 1
+    sub = OmniVoiceBackboneSubmodule(backbone=None, config=OmniVoiceConfig())
+    edge = torch.full((NUM_CODEBOOK, target_len), MASK_ID, dtype=torch.long)
+
+    # Logits that make the argmax a fixed, non-mask token everywhere.
+    logits = torch.zeros(NUM_CODEBOOK, target_len, vocab)
+    logits[..., 7] = 10.0
+    outputs = {"c_logits": [logits], "u_logits": [logits.clone()]}
+    inputs = NodeInputs(tensor_inputs={
+        "audio_tokens": edge,
+        "step_index": torch.zeros(1, dtype=torch.int64),
+    })
+
+    sub.postprocess("a", _fwd_info("a", 0), outputs, inputs)
+
+    assert bool((edge == MASK_ID).all()), "postprocess wrote through the input edge"
+    assert "c_logits" not in outputs and "u_logits" not in outputs
+    tokens = outputs["audio_tokens"][0]
+    assert tokens.shape == (NUM_CODEBOOK, target_len)
+    assert int(outputs["step_index"][0].reshape(-1)[0]) == 1
+
+    revealed = int((tokens != MASK_ID).sum())
+    expected = build_reveal_schedule(
+        target_len=target_len, num_codebook=NUM_CODEBOOK,
+        num_step=GREEDY["num_step"], t_shift=GREEDY["t_shift"],
+    )[0]
+    assert revealed == expected, f"revealed {revealed}, schedule says {expected}"

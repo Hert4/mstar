@@ -22,6 +22,7 @@ from mstar.conductor.request_info import CurrentForwardPassInfo
 from mstar.model.omnivoice.components.backbone import (
     CanvasItem,
     OmniVoiceBackbone,
+    PackedCanvas,
     build_packed_canvas,
 )
 from mstar.model.omnivoice.components.codec import (
@@ -205,7 +206,10 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
             step_index = torch.zeros(1, dtype=torch.int64, device=device)
         else:
             step_index = inputs["step_index"][0]
-            k = int(step_index.reshape(-1)[0].item())
+            # The loop index is already on the host. Reading it off the edge
+            # tensor instead would be a .item() on every iteration, and a host
+            # sync stalls the worker's async pipeline.
+            k = fwd_info.dynamic_loop_iter_counts.get(UNMASK_LOOP_NAME, 0)
             num_step = int(meta["num_step"])
             if k >= num_step:
                 # Async scheduling dispatched an iteration past this request's
@@ -237,13 +241,30 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
         engine_inputs: ModelInputsFromEngine,
         inputs: list[NodeInputs],
     ) -> dict:
-        """Hand the rows through unchanged.
+        """Build the step's packed canvas.
 
-        Nothing is collated here: canvases differ in length, so the padding
-        decision belongs with the batch builder, which needs the per-request
-        CFG flags to know how many rows to allocate.
+        Canvases differ in length per request, so there is no padded collation
+        here; the batch is one packed sequence with a document boundary per
+        CFG branch, and ``engine_inputs.per_request_info`` carries the
+        per-request guidance scale that decides each item's layout.
         """
-        return {"rows": inputs}
+        device = self.get_device()
+        items = [
+            CanvasItem(
+                request_id=rid,
+                prefix_ids=row.tensor_inputs["prefix_ids"],
+                prefix_audio_mask=row.tensor_inputs["prefix_audio_mask"],
+                tokens=row.tensor_inputs["audio_tokens"].unsqueeze(0),
+                guidance_scale=float(
+                    engine_inputs.per_request_info[rid].step_metadata["guidance_scale"]
+                ),
+            )
+            for rid, row in zip(engine_inputs.request_ids, inputs, strict=True)
+        ]
+        return {
+            "items": items,
+            "canvas": build_packed_canvas(items, self.config.audio_mask_id, device),
+        }
 
     def max_batch_size(self, graph_walk: str):
         return self.config.max_batch_size
@@ -273,66 +294,79 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
         self,
         graph_walk: str,
         engine_inputs: ModelInputsFromEngine,
-        rows: list[NodeInputs] | None = None,
+        items: list[CanvasItem] | None = None,
+        canvas: PackedCanvas | None = None,
         **kwargs,
     ) -> dict[str, NameToTensorList]:
-        assert rows is not None, "OmniVoice backbone requires preprocess output"
-        device = self.get_device()
+        """One packed forward over the whole batch.
 
-        items: list[CanvasItem] = []
-        for rid, row in zip(engine_inputs.request_ids, rows, strict=True):
-            meta = engine_inputs.per_request_info[rid].step_metadata
-            items.append(
-                CanvasItem(
-                    request_id=rid,
-                    prefix_ids=row.tensor_inputs["prefix_ids"],
-                    prefix_audio_mask=row.tensor_inputs["prefix_audio_mask"],
-                    # Cloned, not viewed: apply_reveal writes in place, and
-                    # the input tensor is the previous iteration's edge.
-                    tokens=row.tensor_inputs["audio_tokens"].clone().unsqueeze(0),
-                    guidance_scale=float(meta["guidance_scale"]),
-                )
-            )
-
-        canvas = build_packed_canvas(items, self.config.audio_mask_id, device)
+        Nothing request-shaped happens here: the canvas arrives built from
+        ``preprocess`` and the CFG branches leave as a per-request pair of
+        logit blocks, so the body is a single backbone call.
+        """
+        assert items is not None and canvas is not None, (
+            "OmniVoice backbone requires preprocess output"
+        )
         logits = self.backbone(canvas).to(torch.float32)
-
         outputs: dict[str, NameToTensorList] = {}
-        for item, row in zip(items, rows, strict=True):
-            meta = engine_inputs.per_request_info[item.request_id].step_metadata
-            step_index = row.tensor_inputs["step_index"]
-            k = int(step_index.reshape(-1)[0].item())
-
-            schedule = build_reveal_schedule(
-                target_len=item.target_len,
-                num_codebook=self.config.num_audio_codebook,
-                num_step=int(meta["num_step"]),
-                t_shift=float(meta["t_shift"]),
-            )
-
+        for item in items:
             c_logits, u_logits = canvas.slice_logits(logits, item)
-            pred_tokens, scores = predict_tokens_with_scoring(
-                c_logits=c_logits,
-                u_logits=u_logits,
-                audio_mask_id=self.config.audio_mask_id,
-                guidance_scale=item.guidance_scale,
-                class_temperature=float(meta["class_temperature"]),
-            )
-            tokens = apply_reveal(
-                tokens=item.tokens,
-                pred_tokens=pred_tokens,
-                scores=scores,
-                reveal_count=schedule[k] if k < len(schedule) else 0,
-                audio_mask_id=self.config.audio_mask_id,
-                layer_penalty_factor=float(meta["layer_penalty_factor"]),
-                position_temperature=float(meta["position_temperature"]),
-            )
-
             outputs[item.request_id] = {
-                "audio_tokens": [tokens[0]],
-                "step_index": [step_index + 1],
+                "c_logits": [c_logits[0]],
+                "u_logits": [u_logits[0]],
             }
         return outputs
+
+    def postprocess(
+        self,
+        request_id: str,
+        request_info: CurrentForwardPassInfo,
+        outputs: dict[str, list[torch.Tensor]],
+        inputs: NodeInputs | None = None,
+        **kwargs,
+    ):
+        """Turn this request's logits into its next canvas.
+
+        Scoring, the reveal schedule and the in-place write are per-request and
+        data-dependent, which is what keeps them out of ``forward_batched``.
+        No value is read back from the device: the iteration index comes from
+        the CPU-side loop counter and everything else from step metadata.
+        """
+        assert inputs is not None, "OmniVoice backbone postprocess needs its inputs"
+        meta = request_info.step_metadata
+        k = request_info.dynamic_loop_iter_counts.get(UNMASK_LOOP_NAME, 0)
+
+        # Cloned because apply_reveal writes in place and this tensor is the
+        # edge the engine routed in from the previous iteration; mutating it
+        # would edit state the engine still owns.
+        tokens = inputs.tensor_inputs["audio_tokens"].clone().unsqueeze(0)
+        schedule = build_reveal_schedule(
+            target_len=tokens.shape[-1],
+            num_codebook=self.config.num_audio_codebook,
+            num_step=int(meta["num_step"]),
+            t_shift=float(meta["t_shift"]),
+        )
+        pred_tokens, scores = predict_tokens_with_scoring(
+            c_logits=outputs["c_logits"][0].unsqueeze(0),
+            u_logits=outputs["u_logits"][0].unsqueeze(0),
+            audio_mask_id=self.config.audio_mask_id,
+            guidance_scale=float(meta["guidance_scale"]),
+            class_temperature=float(meta["class_temperature"]),
+        )
+        tokens = apply_reveal(
+            tokens=tokens,
+            pred_tokens=pred_tokens,
+            scores=scores,
+            reveal_count=schedule[k] if k < len(schedule) else 0,
+            audio_mask_id=self.config.audio_mask_id,
+            layer_penalty_factor=float(meta["layer_penalty_factor"]),
+            position_temperature=float(meta["position_temperature"]),
+        )
+
+        outputs.pop("c_logits", None)
+        outputs.pop("u_logits", None)
+        outputs["audio_tokens"] = [tokens[0]]
+        outputs["step_index"] = [inputs.tensor_inputs["step_index"] + 1]
 
     def forward(
         self,
