@@ -206,10 +206,11 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
             step_index = torch.zeros(1, dtype=torch.int64, device=device)
         else:
             step_index = inputs["step_index"][0]
-            # The loop index is already on the host. Reading it off the edge
-            # tensor instead would be a .item() on every iteration, and a host
-            # sync stalls the worker's async pipeline.
-            k = fwd_info.dynamic_loop_iter_counts.get(UNMASK_LOOP_NAME, 0)
+            # Read the counter off the edge tensor, not from
+            # fwd_info.dynamic_loop_iter_counts: the worker sets that wrong on
+            # the speculative path, so the edge is the reliable source until
+            # that is fixed upstream. Costs a .item() per iteration.
+            k = int(step_index.reshape(-1)[0].item())
             num_step = int(meta["num_step"])
             if k >= num_step:
                 # Async scheduling dispatched an iteration past this request's
@@ -329,12 +330,13 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
 
         Scoring, the reveal schedule and the in-place write are per-request and
         data-dependent, which is what keeps them out of ``forward_batched``.
-        No value is read back from the device: the iteration index comes from
-        the CPU-side loop counter and everything else from step metadata.
+        The iteration index is read off the ``step_index`` edge rather than
+        ``dynamic_loop_iter_counts``, which the worker sets wrong on the
+        speculative path; everything else comes from step metadata.
         """
         assert inputs is not None, "OmniVoice backbone postprocess needs its inputs"
         meta = request_info.step_metadata
-        k = request_info.dynamic_loop_iter_counts.get(UNMASK_LOOP_NAME, 0)
+        k = int(inputs.tensor_inputs["step_index"].reshape(-1)[0].item())
 
         # Cloned because apply_reveal writes in place and this tensor is the
         # edge the engine routed in from the previous iteration; mutating it
