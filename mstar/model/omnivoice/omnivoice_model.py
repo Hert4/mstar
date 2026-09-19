@@ -3,8 +3,9 @@
 Two graph walks:
 
 ``encode_reference``
-    Codec-encode the cloning reference once; the tokens persist so repeat
-    requests against the same voice skip it.  Cloning requests only.
+    Codec-encode the cloning reference once per request; the tokens persist
+    from this walk into the generation walk rather than being re-encoded at
+    every diffusion step.  Cloning requests only.
 
 ``speech_gen`` / ``speech_gen_clone``
     ``Loop(backbone) -> code2wav -> client``.  Separate walks per mode so the
@@ -45,7 +46,11 @@ from mstar.model.omnivoice.components.backbone import (
     assert_flashinfer_api,
 )
 from mstar.model.omnivoice.components.codec import load_codec
-from mstar.model.omnivoice.components.text import build_prefix
+from mstar.model.omnivoice.components.text import (
+    build_prefix,
+    resolve_instruct,
+    resolve_language,
+)
 from mstar.model.omnivoice.config import OmniVoiceConfig
 from mstar.model.omnivoice.submodules import (
     UNMASK_LOOP_NAME,
@@ -74,11 +79,12 @@ class OmniVoiceModel(Model):
         skip_weight_loading: bool = False,
         **kwargs,
     ):
-        # A deployment points at a mounted checkpoint rather than the Hub: the
-        # registry entry names the public k2-fsa weights, but MISA serves its
-        # own fine-tune from object storage, and the two are the same
-        # architecture. _refresh_checkpoint_defaults is what catches a
-        # fine-tune that actually diverged.
+        # Point a deployment at a mounted checkpoint instead of the Hub: the
+        # registry entry names the public k2-fsa weights, but a fine-tune of
+        # the same architecture is served from a local volume just as often.
+        # _refresh_checkpoint_defaults is what catches a fine-tune whose
+        # config actually diverged. Documented in
+        # docs/environment_variables.rst.
         self.model_path_hf = os.environ.get("MSTAR_OMNIVOICE_MODEL_PATH") or model_path_hf
         self.cache_dir = cache_dir
         self.config = OmniVoiceConfig()
@@ -290,13 +296,17 @@ class OmniVoiceModel(Model):
             )
 
         num_ref_tokens = None
+        ref_waveform = None
+        ref_rms = None
         if ref_audio:
-            waveform = ref_audio[0]
+            ref_waveform, ref_rms, ref_text = self._prepare_reference(
+                ref_audio[0], ref_text
+            )
             # Exact, not estimated: encode downsamples by a whole hop, so the
             # frame count follows from the sample count and the canvas length
             # can be settled before the GPU encode runs.
             hop = self._codec_hop_length()
-            num_ref_tokens = int(waveform.shape[-1]) // hop
+            num_ref_tokens = int(ref_waveform.shape[-1]) // hop
             if num_ref_tokens < 1:
                 raise ValueError(
                     f"Reference audio is shorter than one codec hop ({hop} samples)"
@@ -326,13 +336,15 @@ class OmniVoiceModel(Model):
             tokenizer=self.tokenizer,
             text=prompt,
             num_audio_codebook=self.config.num_audio_codebook,
-            language=kwargs.get("language"),
-            instruct=kwargs.get("instruct"),
+            language=resolve_language(kwargs.get("language")),
+            instruct=resolve_instruct(kwargs.get("instruct")),
             ref_text=ref_text,
             # The reference tokens are not available on the data worker; the
             # ref_encoder walk supplies them, and get_initial_forward_pass_args
-            # splices them into the prefix before the loop starts.
+            # splices them into the prefix before the loop starts. The style
+            # span still has to know a reference is coming, hence the flag.
             ref_audio_tokens=None,
+            has_reference=bool(ref_audio),
             denoise=bool(kwargs.get("denoise", self.config.generation.denoise)),
         )
 
@@ -342,17 +354,54 @@ class OmniVoiceModel(Model):
             "target_len": [torch.tensor([target_len], dtype=torch.long)],
         }
         if ref_audio:
-            out["ref_audio_inputs"] = [ref_audio[0]]
-            # The reference matches the clone's level to the source's RMS, so a
-            # quiet reference yields quiet speech. Measured here, where the
-            # waveform already is: code2wav only ever sees tokens.
-            out["ref_rms"] = [
-                torch.tensor(
-                    [float(ref_audio[0].float().pow(2).mean().sqrt())],
-                    dtype=torch.float32,
-                )
-            ]
+            out["ref_audio_inputs"] = [ref_waveform]
+            # The *original* RMS, measured before the level normalisation in
+            # _prepare_reference: post_process uses it to put the clone back at
+            # the source's loudness, so a quiet reference yields quiet speech.
+            out["ref_rms"] = [torch.tensor([ref_rms], dtype=torch.float32)]
         return out
+
+    def _prepare_reference(
+        self, waveform: torch.Tensor, ref_text: str | None
+    ) -> tuple[torch.Tensor, float, str | None]:
+        """The reference conditioning the encoder expects, and its true level.
+
+        A port of the CPU half of the reference's ``create_voice_clone_prompt``.
+        Three steps, all of which the checkpoint was trained behind:
+
+        - level: a reference quieter than RMS 0.1 is brought up to it, so the
+          encoder always sees the same loudness. The *original* RMS is returned
+          and `post_process` scales the clone back down by it; without the
+          normalisation here the quiet reference would be attenuated twice.
+        - silence: trimmed with the reference's own settings. Long-audio
+          trimming is skipped because a user-supplied transcript would stop
+          matching the audio.
+        - transcript: punctuated, as the reference does.
+        """
+        from omnivoice.utils.audio import remove_silence
+        from omnivoice.utils.text import add_punctuation
+
+        audio = waveform.float()
+        rms = float(audio.pow(2).mean().sqrt())
+        if 0.0 < rms < 0.1:
+            audio = audio * (0.1 / rms)
+
+        flat = audio.reshape(1, -1)
+        trimmed = remove_silence(
+            flat.numpy(), self.config.sample_rate, mid_sil=200, lead_sil=100, trail_sil=200
+        )
+        trimmed = torch.as_tensor(trimmed).reshape(-1)
+        if trimmed.numel() == 0:
+            raise ValueError("Reference audio is empty after silence removal.")
+
+        seconds = trimmed.numel() / self.config.sample_rate
+        if seconds > 20.0:
+            logger.warning(
+                "OmniVoice: reference audio is %.1fs (>20s), which slows "
+                "generation and degrades the clone; 3-10s is the sweet spot.",
+                seconds,
+            )
+        return trimmed, rms, add_punctuation(ref_text) if ref_text else ref_text
 
     def _codec_hop_length(self) -> int:
         """The codec's hop, read from its config without loading the weights."""

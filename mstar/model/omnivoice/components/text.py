@@ -10,9 +10,12 @@ The prefix these build is fixed for a request's whole diffusion loop, so it is
 computed once on the data worker and persisted, not rebuilt per step.
 """
 
+import logging
 import re
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 # Tags tokenized standalone so their ids do not depend on the surrounding
 # language's context.
@@ -65,6 +68,45 @@ def tokenize_with_nonverbal_tags(text: str, tokenizer) -> torch.Tensor:
     return torch.tensor([combined], dtype=torch.long)
 
 
+def resolve_language(language: str | None) -> str | None:
+    """Map a language name to the id the model was trained on.
+
+    ``"English"`` becomes ``"en"``, an id passes through, anything else warns
+    and resolves to ``None``.  The style span is a token, not prose: a raw
+    ``"Chinese"`` reaching the backbone produces background noise rather than
+    Chinese.  Reads the reference's own public ``lang_map`` tables, so a
+    language added upstream needs no change here.
+    """
+    if language is None or language.lower() == "none":
+        return None
+    from omnivoice.utils.lang_map import LANG_IDS, LANG_NAME_TO_ID
+
+    if language in LANG_IDS:
+        return language
+    resolved = LANG_NAME_TO_ID.get(language.lower())
+    if resolved is None:
+        logger.warning(
+            "OmniVoice: language %r is not a known id or name; falling back "
+            "to language-agnostic mode.", language,
+        )
+    return resolved
+
+
+def resolve_instruct(instruct: str | None) -> str | None:
+    """Validate a voice-design instruct string, raising ``ValueError`` on a bad one.
+
+    Delegates to the reference's validator rather than re-porting it: the
+    vocabulary is long (gender, age, pitch, style, accent, and the Chinese
+    dialect list) and it silently repairs separator mistakes, so a second copy
+    would drift from the checkpoint it has to match.
+    """
+    if instruct is None:
+        return None
+    from omnivoice.models.omnivoice import _resolve_instruct
+
+    return _resolve_instruct(instruct)
+
+
 def build_style_text(
     language: str | None,
     instruct: str | None,
@@ -94,6 +136,7 @@ def build_prefix(
     instruct: str | None = None,
     ref_text: str | None = None,
     ref_audio_tokens: torch.Tensor | None = None,
+    has_reference: bool | None = None,
     denoise: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Everything before the target canvas.
@@ -101,12 +144,20 @@ def build_prefix(
     Returns ``(prefix_ids [C, N], prefix_audio_mask [N])``.  Text spans repeat
     one row of ids across all ``C`` codebook rows; the reference audio span is
     genuinely per-codebook and is the only part of the prefix flagged as audio.
+
+    ``has_reference`` is separate from ``ref_audio_tokens`` on purpose.  The
+    style span is built on the data worker, where the reference has not been
+    encoded yet, so the tokens are ``None`` there even for a cloning request;
+    inferring the flag from them would drop ``<|denoise|>`` from every clone.
+    Defaults to the tokens being present, for callers that have both.
     """
+    if has_reference is None:
+        has_reference = ref_audio_tokens is not None
     style_text = build_style_text(
         language=language,
         instruct=instruct,
         denoise=denoise,
-        has_reference=ref_audio_tokens is not None,
+        has_reference=has_reference,
     )
     style_tokens = (
         tokenizer(style_text, return_tensors="pt")

@@ -36,6 +36,7 @@ import os
 import pytest
 import torch
 
+from mstar.conductor.request_info import CurrentForwardPassInfo
 from mstar.model.omnivoice.components.backbone import CanvasItem, build_packed_canvas
 from mstar.model.omnivoice.components.text import build_prefix
 from mstar.model.omnivoice.components.unmask import (
@@ -49,7 +50,6 @@ from mstar.model.omnivoice.submodules import (
     OmniVoiceBackboneSubmodule,
 )
 from mstar.model.submodule_base import NodeInputs
-from mstar.conductor.request_info import CurrentForwardPassInfo
 
 MODEL_PATH = os.environ.get("OMNIVOICE_PATH", "k2-fsa/OmniVoice")
 NUM_CODEBOOK = 8
@@ -61,6 +61,16 @@ GREEDY = dict(
     # Nothing random is left, so two correct implementations must agree exactly.
     position_temperature=0.0, class_temperature=0.0,
 )
+
+
+class _DummyTokenizer:
+    """One id per character. Enough to compare prefix lengths without weights."""
+
+    def __call__(self, text, return_tensors=None, add_special_tokens=True):
+        ids = [ord(c) % 1000 for c in text]
+        if return_tensors == "pt":
+            return type("Out", (), {"input_ids": torch.tensor([ids], dtype=torch.long)})()
+        return type("Out", (), {"input_ids": ids})()
 
 
 def _item(request_id: str, prefix_len: int, target_len: int, guidance_scale: float = 2.0):
@@ -151,9 +161,83 @@ def test_mask_class_is_never_predicted():
     assert (pred != MASK_ID).all()
 
 
+def test_sampling_is_reproducible_under_a_seed():
+    """Same seed, same draw; different seed, different draw.
+
+    Both stochastic paths are covered: the token choice inside
+    ``predict_tokens_with_scoring`` and the reveal order in ``apply_reveal``.
+    """
+    item = _item("seeded", prefix_len=10, target_len=6)
+    canvas = build_packed_canvas([item], MASK_ID, torch.device("cpu"))
+    logits = torch.randn(1, NUM_CODEBOOK, 2 * canvas.flat_target_total, 1025)
+    c_logits, u_logits = canvas.slice_logits(logits, item)
+
+    def draw(seed):
+        gen = torch.Generator().manual_seed(seed)
+        pred, scores = predict_tokens_with_scoring(
+            c_logits, u_logits, MASK_ID, guidance_scale=2.0,
+            class_temperature=1.0, generator=gen,
+        )
+        tokens = torch.full((1, NUM_CODEBOOK, 6), MASK_ID, dtype=torch.long)
+        revealed = apply_reveal(
+            tokens=tokens, pred_tokens=pred, scores=scores, reveal_count=5,
+            audio_mask_id=MASK_ID, layer_penalty_factor=0.1,
+            position_temperature=1.0, generator=gen,
+        )
+        return pred.clone(), revealed.clone()
+
+    pred_a, rev_a = draw(1234)
+    pred_b, rev_b = draw(1234)
+    pred_c, rev_c = draw(5678)
+    assert torch.equal(pred_a, pred_b)
+    assert torch.equal(rev_a, rev_b)
+    assert not (torch.equal(pred_a, pred_c) and torch.equal(rev_a, rev_c))
+
+
 # ---------------------------------------------------------------------------
 # prompt
 # ---------------------------------------------------------------------------
+
+
+def test_denoise_survives_a_reference_that_is_not_encoded_yet():
+    """The style span must carry <|denoise|> for a cloning request.
+
+    The data worker builds the prefix before the reference is encoded, so
+    ``ref_audio_tokens`` is None there even when cloning. Inferring the flag
+    from the tokens dropped the token from every clone.
+    """
+    from mstar.model.omnivoice.components.text import build_style_text
+
+    assert "<|denoise|>" in build_style_text(
+        language="en", instruct=None, denoise=True, has_reference=True
+    )
+    assert "<|denoise|>" not in build_style_text(
+        language="en", instruct=None, denoise=True, has_reference=False
+    )
+
+    tokenizer = _DummyTokenizer()
+    with_ref, _ = build_prefix(
+        tokenizer=tokenizer, text="hello", num_audio_codebook=NUM_CODEBOOK,
+        language="en", ref_audio_tokens=None, has_reference=True, denoise=True,
+    )
+    without_ref, _ = build_prefix(
+        tokenizer=tokenizer, text="hello", num_audio_codebook=NUM_CODEBOOK,
+        language="en", ref_audio_tokens=None, has_reference=False, denoise=True,
+    )
+    assert with_ref.shape[-1] > without_ref.shape[-1]
+
+
+def test_language_names_resolve_to_ids():
+    """A name reaching the style span as prose produces noise, not speech."""
+    pytest.importorskip("omnivoice")
+    from mstar.model.omnivoice.components.text import resolve_language
+
+    assert resolve_language("Chinese") == "zh"
+    assert resolve_language("English") == "en"
+    assert resolve_language("zh") == "zh"
+    assert resolve_language(None) is None
+    assert resolve_language("None") is None
+    assert resolve_language("Klingon") is None
 
 
 def test_prefix_parity():

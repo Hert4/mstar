@@ -84,8 +84,11 @@ class OmniVoiceRefEncoderSubmodule(_SingleRequestMixin, NodeSubmodule):
 
     Consumes ``ref_audio_inputs`` — one mono waveform already resampled to the
     codec's rate by the request seam — and emits ``ref_audio_tokens`` ``[C, T]``.
-    The edge persists so a caller cloning the same voice repeatedly pays the
-    encode once; that is what the reference's ``VoiceClonePrompt`` is for.
+    The edge is marked ``persist`` so the tokens survive from the
+    ``encode_reference`` walk into the generation walk of the *same* request;
+    the encode runs once per request, not once per voice. Caching a voice
+    across requests, the reference's ``VoiceClonePrompt``, would need a store
+    the engine does not have today.
     """
 
     disable_torch_compile = True
@@ -348,12 +351,18 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
             num_step=int(meta["num_step"]),
             t_shift=float(meta["t_shift"]),
         )
+        # Reseeded per step from the request's seed plus the iteration, so a
+        # replay matches step for step; one generator for the whole request
+        # would only match if every step ran in the same order, which async
+        # scheduling does not promise.
+        generator = self._step_generator(request_info, k, tokens.device)
         pred_tokens, scores = predict_tokens_with_scoring(
             c_logits=outputs["c_logits"][0].unsqueeze(0),
             u_logits=outputs["u_logits"][0].unsqueeze(0),
             audio_mask_id=self.config.audio_mask_id,
             guidance_scale=float(meta["guidance_scale"]),
             class_temperature=float(meta["class_temperature"]),
+            generator=generator,
         )
         tokens = apply_reveal(
             tokens=tokens,
@@ -363,12 +372,30 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
             audio_mask_id=self.config.audio_mask_id,
             layer_penalty_factor=float(meta["layer_penalty_factor"]),
             position_temperature=float(meta["position_temperature"]),
+            generator=generator,
         )
 
         outputs.pop("c_logits", None)
         outputs.pop("u_logits", None)
         outputs["audio_tokens"] = [tokens[0]]
         outputs["step_index"] = [inputs.tensor_inputs["step_index"] + 1]
+
+    @staticmethod
+    def _step_generator(
+        request_info: CurrentForwardPassInfo, k: int, device: torch.device
+    ) -> torch.Generator | None:
+        """The request's RNG for iteration ``k``, or ``None`` when unseeded.
+
+        Seed 0 is the conductor's default and means "nobody asked", so it is
+        left on the global RNG rather than pinned to one fixed stream for
+        every request.
+        """
+        seed = getattr(request_info, "random_seed", 0) or 0
+        if not seed:
+            return None
+        generator = torch.Generator(device=device)
+        generator.manual_seed((int(seed) + k) & 0x7FFF_FFFF_FFFF_FFFF)
+        return generator
 
     def forward(
         self,

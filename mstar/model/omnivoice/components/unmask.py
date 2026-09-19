@@ -73,10 +73,24 @@ def filter_top_k(logits: torch.Tensor, ratio: float = 0.1) -> torch.Tensor:
     return probs
 
 
-def gumbel_sample(logits: torch.Tensor, temperature: float) -> torch.Tensor:
-    """Add Gumbel noise at ``temperature``; caller takes the argmax."""
+def gumbel_sample(
+    logits: torch.Tensor,
+    temperature: float,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Add Gumbel noise at ``temperature``; caller takes the argmax.
+
+    ``generator`` carries the request's seed. Both draws in a step (token
+    choice and reveal order) come from it, so a seeded request replays
+    exactly; passing ``None`` keeps the global RNG and stays unreproducible.
+    """
     scaled_logits = logits / temperature
-    u = torch.rand_like(scaled_logits)
+    u = torch.rand(
+        scaled_logits.shape,
+        dtype=scaled_logits.dtype,
+        device=scaled_logits.device,
+        generator=generator,
+    )
     gumbel_noise = -torch.log(-torch.log(u + 1e-10) + 1e-10)
     return scaled_logits + gumbel_noise
 
@@ -87,6 +101,7 @@ def predict_tokens_with_scoring(
     audio_mask_id: int,
     guidance_scale: float,
     class_temperature: float,
+    generator: torch.Generator | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """CFG-combine conditional and unconditional logits, then rank.
 
@@ -99,6 +114,7 @@ def predict_tokens_with_scoring(
             the unconditional forward).
         class_temperature: 0 takes the argmax; above 0 samples from the top
             decile with Gumbel noise.
+        generator: the request's seeded RNG, or ``None`` for the global one.
 
     Returns:
         ``(pred_tokens, confidence_scores)``, each ``[1, C, T]``.  The scores
@@ -118,7 +134,9 @@ def predict_tokens_with_scoring(
 
     if class_temperature > 0.0:
         filtered_probs = filter_top_k(log_probs, ratio=0.1)
-        pred_tokens = gumbel_sample(filtered_probs, class_temperature).argmax(dim=-1)
+        pred_tokens = gumbel_sample(
+            filtered_probs, class_temperature, generator
+        ).argmax(dim=-1)
     else:
         pred_tokens = log_probs.argmax(dim=-1)
 
@@ -134,6 +152,7 @@ def apply_reveal(
     audio_mask_id: int,
     layer_penalty_factor: float,
     position_temperature: float,
+    generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     """Reveal ``reveal_count`` cells of ``tokens`` in place and return it.
 
@@ -152,6 +171,7 @@ def apply_reveal(
     Args:
         tokens: ``[1, C, T]``, the request's live canvas, modified in place.
         pred_tokens, scores: ``[1, C, T]`` from ``predict_tokens_with_scoring``.
+        generator: the request's seeded RNG, or ``None`` for the global one.
     """
     if reveal_count <= 0:
         return tokens
@@ -161,7 +181,7 @@ def apply_reveal(
     scores = scores - (layer_ids * layer_penalty_factor)
 
     if position_temperature > 0.0:
-        scores = gumbel_sample(scores, position_temperature)
+        scores = gumbel_sample(scores, position_temperature, generator)
 
     scores = scores.masked_fill(tokens != audio_mask_id, -float("inf"))
 

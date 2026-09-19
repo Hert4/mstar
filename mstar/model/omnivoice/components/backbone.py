@@ -36,9 +36,9 @@ _REQUIRED_FI_NAMES = ("_CTX", "PackedAttnRunner", "_forward_logits", "apply_flas
 
 
 def assert_flashinfer_api():
-    """Fail at boot if the reference's packed-attention surface moved.
+    """Fail at boot if the reference's private surface moved.
 
-    These four names are private to ``omnivoice``. Pinning them here means an
+    These names are private to ``omnivoice``. Pinning them here means an
     upgrade that renames one produces a clear error on startup instead of a
     silent fallback or a first-request crash.
     """
@@ -51,6 +51,15 @@ def assert_flashinfer_api():
             f"{missing}; mstar's OmniVoice backbone drives its packed "
             "attention directly. Pin the omnivoice version, or port the "
             "packed forward into mstar."
+        )
+
+    from omnivoice.models import omnivoice as ov
+
+    if not hasattr(ov, "_resolve_instruct"):
+        raise RuntimeError(
+            "omnivoice.models.omnivoice is missing _resolve_instruct; "
+            "mstar validates voice-design instructs with it. Pin the "
+            "omnivoice version, or port the validator into mstar."
         )
     return fi
 
