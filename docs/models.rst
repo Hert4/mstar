@@ -76,8 +76,12 @@ OmniVoice notes
 - Zero-shot only: there are no built-in speakers. Pass ``ref_audio`` with its
   transcript in ``ref_text`` to clone a voice, or describe one in ``voice``.
   ``ref_text`` is required alongside ``ref_audio``.
-- ``language`` is written into the prompt verbatim, so give the language's name
-  (``Vietnamese``), not an ISO code.
+- ``language`` takes either the name (``Vietnamese``) or the id (``vi``): a
+  name is resolved to the id the model was trained on before the prompt is
+  built, and an unrecognised value warns and falls back to language-agnostic
+  mode.
+- The ``omnivoice`` package is installed separately from git rather than by an
+  extra — see :doc:`installation`.
 - The backbone is not autoregressive: it fills a fixed canvas of eight codebook
   rows over a few unmasking steps, so there is no KV cache and no per-token
   sampling loop. Serve it with ``mstar serve omnivoice --gpus 0``.

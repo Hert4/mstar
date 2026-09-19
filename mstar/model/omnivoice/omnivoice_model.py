@@ -337,7 +337,7 @@ class OmniVoiceModel(Model):
             text=prompt,
             num_audio_codebook=self.config.num_audio_codebook,
             language=resolve_language(kwargs.get("language")),
-            instruct=resolve_instruct(kwargs.get("instruct")),
+            instruct=resolve_instruct(kwargs.get("instruct"), prompt),
             ref_text=ref_text,
             # The reference tokens are not available on the data worker; the
             # ref_encoder walk supplies them, and get_initial_forward_pass_args
@@ -390,7 +390,9 @@ class OmniVoiceModel(Model):
         trimmed = remove_silence(
             flat.numpy(), self.config.sample_rate, mid_sil=200, lead_sil=100, trail_sil=200
         )
-        trimmed = torch.as_tensor(trimmed).reshape(-1)
+        # .float() because remove_silence round-trips through pydub and comes
+        # back float64; the encoder is fed float32 everywhere else.
+        trimmed = torch.as_tensor(trimmed).float().reshape(-1)
         if trimmed.numel() == 0:
             raise ValueError("Reference audio is empty after silence removal.")
 
@@ -701,14 +703,34 @@ class OmniVoiceModel(Model):
 
         return None
 
-    def _refresh_checkpoint_defaults(self, checkpoint_config) -> None:
-        """Hard-fail on drift in the values the ported math assumes.
+    # Sampling knobs a checkpoint may retune. Overridden from its config.json
+    # when present; the values in config.py are only the fallback. Kept
+    # separate from the architecture fields below, which are checked instead
+    # of overridden.
+    _GENERATION_OVERRIDES = (
+        "num_step", "guidance_scale", "t_shift", "layer_penalty_factor",
+        "position_temperature", "class_temperature", "denoise",
+    )
 
-        The unmask step indexes the audio table by codebook and drives the MASK
-        class to -inf by id.  If a future checkpoint changes either, the model
-        would still run and quietly produce noise, so it is checked rather than
-        trusted.
+    def _refresh_checkpoint_defaults(self, checkpoint_config) -> None:
+        """Take the checkpoint's generation defaults; hard-fail on architecture drift.
+
+        Two different things:
+
+        - Generation knobs are a property of the checkpoint, so a fine-tune
+          that was tuned at 16 steps is honoured rather than silently run at
+          this file's 32. A per-request value in ``step_metadata`` still wins.
+        - ``num_audio_codebook`` / ``audio_vocab_size`` / ``audio_mask_id``
+          are not overridable. The unmask step indexes the audio table by
+          codebook and drives the MASK class to -inf by id, so a checkpoint
+          that moved either would run and quietly produce noise.
         """
+        gen_config = getattr(checkpoint_config, "generation_config", None) or checkpoint_config
+        for attr in self._GENERATION_OVERRIDES:
+            value = getattr(gen_config, attr, None)
+            if value is not None:
+                setattr(self.config.generation, attr, value)
+
         for attr in ("num_audio_codebook", "audio_vocab_size", "audio_mask_id"):
             expected = getattr(self.config, attr)
             actual = getattr(checkpoint_config, attr, expected)

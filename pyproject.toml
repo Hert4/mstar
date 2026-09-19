@@ -49,10 +49,14 @@ mstar-serve = "mstar.api_server.entrypoint:main"
 [project.optional-dependencies]
 # OmniVoice reuses the reference package for weight loading, the rule-based
 # duration estimator, language/instruct validation and the pydub silence
-# trim; mstar owns the graph. From git rather than PyPI: the released sdist
-# has no `omnivoice.models.omnivoice_flashinfer`, which is the forward this
-# graph calls, so the PyPI build fails at import.
-omnivoice = ["omnivoice @ git+https://github.com/k2-fsa/OmniVoice.git"]
+# trim; mstar owns the graph.
+#
+# Deliberately not pinned here: the PyPI release has no
+# `omnivoice.models.omnivoice_flashinfer`, which is the forward this graph
+# calls, so it has to come from git. A direct URL in requires_dist would make
+# PyPI reject the mstar upload, so it is an install step instead — see
+# docs/installation.rst, same as flash-attn.
+omnivoice = []
 
 dev = [
     "ruff<=0.16",
@@ -228,10 +232,9 @@ all = [
     # flash-attn is intentionally omitted (Qwen3-Omni needs it) — install it
     # separately, see docs/installation.rst.
     "jiwer",
-    # omnivoice (see the [omnivoice] extra) — a git dependency, so `pip install
-    # mstar[all]` needs --find-links-free resolution; it is here so `all` is
-    # actually all.
-    "omnivoice @ git+https://github.com/k2-fsa/OmniVoice.git",
+    # omnivoice is intentionally omitted for the same reason as flash-attn: it
+    # has to come from git, which PyPI will not accept in requires_dist.
+    # See docs/installation.rst.
 ]
 
 [tool.setuptools.packages.find]

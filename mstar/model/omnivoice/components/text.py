@@ -92,19 +92,24 @@ def resolve_language(language: str | None) -> str | None:
     return resolved
 
 
-def resolve_instruct(instruct: str | None) -> str | None:
+def resolve_instruct(instruct: str | None, text: str = "") -> str | None:
     """Validate a voice-design instruct string, raising ``ValueError`` on a bad one.
 
     Delegates to the reference's validator rather than re-porting it: the
     vocabulary is long (gender, age, pitch, style, accent, and the Chinese
     dialect list) and it silently repairs separator mistakes, so a second copy
     would drift from the checkpoint it has to match.
+
+    ``text`` picks the vocabulary the way the reference does, by looking for a
+    CJK character in the text being spoken rather than by the ``language``
+    argument: a Chinese instruct is rejected against the English list.
     """
     if instruct is None:
         return None
     from omnivoice.models.omnivoice import _resolve_instruct
+    from omnivoice.utils.voice_design import _ZH_RE
 
-    return _resolve_instruct(instruct)
+    return _resolve_instruct(instruct, use_zh=bool(text and _ZH_RE.search(text)))
 
 
 def build_style_text(
