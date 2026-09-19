@@ -1,0 +1,26 @@
+test/omnivoice/test_parity.py
+  s_09585eaa5ae234::t_ec0f1d88e2066b 536,538-539
+  s_09585eaa5ae234::t_b755f05625ca50 317,320-322,324
+  s_09585eaa5ae234::t_022988c338eb8e 366-393
+  s_09585eaa5ae234::t_f104efb23a09b8 435,440-449,457-480,482-489
+  s_09585eaa5ae234::t_4672e6ac2c8605 502-508,528,533,537
+  s_09585eaa5ae234::t_10e40a3c70b400 509-517
+  s_09585eaa5ae234::t_ab21c0960cd524 394
+  s_09585eaa5ae234::t_800c2f8b1e62fb 15-20,23-27,344,347,397-400,408
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "a3c05a71dfe6f3aad0737c4ff4e76501aa2ca177",
+  "prompts": {},
+  "sessions": {
+    "s_09585eaa5ae234": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ba627df6-ab74-4aae-912b-cb5aed0a70d7",
+        "model": "claude-opus-5"
+      },
+      "human_author": "tmduc3 <tmduc3@rd.misa.com.vn>"
+    }
+  }
+}
