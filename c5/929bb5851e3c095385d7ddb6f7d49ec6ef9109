@@ -1,0 +1,31 @@
+docs/installation.rst
+  s_09585eaa5ae234::t_e084fd80547304 70-73
+  s_09585eaa5ae234::t_c75257acd1ee28 131-152
+docs/models.rst
+  s_09585eaa5ae234::t_1cfbf80cd57a9c 79-84
+pyproject.toml
+  s_09585eaa5ae234::t_a15ff239c75313 52-59
+  s_09585eaa5ae234::t_2053df9ef223e2 235-237
+mstar/model/omnivoice/components/text.py
+  s_09585eaa5ae234::t_7c2c860fdcc2a4 95,102-105,110,112
+mstar/model/omnivoice/omnivoice_model.py
+  s_09585eaa5ae234::t_acfd182469cafe 340
+  s_09585eaa5ae234::t_8bf139798738d3 706-714,716-718,720-726,728-733
+  s_09585eaa5ae234::t_e57ea162c109a9 393-395
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "c5929bb5851e3c095385d7ddb6f7d49ec6ef9109",
+  "prompts": {},
+  "sessions": {
+    "s_09585eaa5ae234": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ba627df6-ab74-4aae-912b-cb5aed0a70d7",
+        "model": "claude-opus-5"
+      },
+      "human_author": "tmduc3 <tmduc3@rd.misa.com.vn>"
+    }
+  }
+}
