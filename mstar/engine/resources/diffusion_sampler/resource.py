@@ -8,9 +8,9 @@ step, and where the accepted tokens go are the model's business, because they
 depend on a schedule and a ranking that differ per decoder.
 
 Everything here runs batched over a packed ``[rows, positions, vocab]``
-tensor. Per-request knobs become vectors gathered once per step, so a batch
-mixing guidance scales and temperatures is one kernel path, not a Python loop
-over requests.
+tensor. Guidance is a per-position vector, so a batch mixing guidance scales
+is one kernel path. The token draw is not: when any request samples, each one
+draws on its own slice from its own seeded stream (see ``_pick``).
 """
 
 import math
@@ -96,9 +96,10 @@ class DiffusionSamplerResource(Resource):
                 zeros, which only makes sense for an unseeded caller.
 
         Returns:
-            ``tokens`` and ``logprobs``, both ``[rows, positions]``. The
-            log-probability returned is the one of the token that won, which
-            is what a confidence-ranked reveal needs.
+            ``tokens`` and ``logprobs``, both ``[rows, positions]``.
+            ``logprobs`` is each position's max log-probability, the
+            confidence a ranked reveal sorts on, also when the drawn token is
+            not the argmax.
         """
         if c_logits.dim() != 3:
             raise ValueError(
@@ -127,37 +128,36 @@ class DiffusionSamplerResource(Resource):
                 f"{len(request_ids)} requests but {len(iterations)} iterations"
             )
 
-        guidance, temperature = self._per_position(request_ids, seq_lens)
-        log_probs = self._combine(c_logits, u_logits, guidance)
+        scales = [self._config(rid).guidance_scale for rid in request_ids]
+        if u_logits is None or not any(scales):
+            log_probs = F.log_softmax(c_logits, dim=-1)
+        else:
+            log_probs = self._combine(
+                c_logits, u_logits, self._guidance(scales, seq_lens), mixed=not all(scales)
+            )
 
         if self._forbidden_class is not None:
             log_probs[..., self._forbidden_class] = -float("inf")
 
-        tokens = self._pick(
-            log_probs, temperature, request_ids, seq_lens, iterations
-        )
-        logprobs = log_probs.gather(-1, tokens.unsqueeze(-1)).squeeze(-1)
-        return tokens, logprobs
+        tokens = self._pick(log_probs, request_ids, seq_lens, iterations)
+        # The max, not the drawn token's log-prob: the reference ranks the
+        # reveal on it whichever token the Gumbel draw landed on.
+        return tokens, log_probs.max(dim=-1).values
 
     # -- internals ---------------------------------------------------------
 
-    def _per_position(self, request_ids, seq_lens):
-        """Broadcast each request's knobs across the positions it owns."""
-        default = DiffusionSamplingReqConfig()
-        g, t = [], []
-        for rid, n in zip(request_ids, seq_lens, strict=True):
-            cfg = self._configs.get(rid, default)
-            g.extend([cfg.guidance_scale] * n)
-            t.extend([cfg.temperature] * n)
-        opts = dict(device=self._device, dtype=torch.float32)
-        # [1, positions, 1]: rows and vocab broadcast.
-        return (
-            torch.tensor(g, **opts).view(1, -1, 1),
-            torch.tensor(t, **opts).view(1, -1, 1),
+    def _guidance(self, scales, seq_lens):
+        """Each request's guidance scale across the positions it owns, as
+        ``[1, positions, 1]``. Built on the host and copied without a sync."""
+        g = torch.tensor(
+            [s for s, n in zip(scales, seq_lens, strict=True) for _ in range(n)],
+            dtype=torch.float32,
+            pin_memory=self._device.type == "cuda",
         )
+        return g.to(self._device, non_blocking=True).view(1, -1, 1)
 
     @staticmethod
-    def _combine(c_logits, u_logits, guidance):
+    def _combine(c_logits, u_logits, guidance, mixed):
         """Classifier-free guidance, in the reference's operation order.
 
         The log_softmax really is applied twice on the guided path: the
@@ -165,22 +165,22 @@ class DiffusionSamplerResource(Resource):
         renormalised. Matching that matters more than tidying it, because the
         checkpoint was tuned behind it.
 
-        A batch with no guidance anywhere skips the second normalisation
-        entirely rather than multiplying by a zero vector, since
-        ``log_softmax(log_softmax(x))`` is not ``log_softmax(x)``.
+        A batch with no guidance anywhere never gets here: ``sample`` skips the
+        second normalisation, since ``log_softmax(log_softmax(x))`` is not
+        ``log_softmax(x)``. ``mixed`` is decided on the host for the same
+        reason the vector is built there: a ``bool()`` on a device tensor
+        would wait for the forward.
         """
         plain = F.log_softmax(c_logits, dim=-1)
-        if u_logits is None or not bool((guidance != 0).any()):
-            return plain
         guided = torch.log_softmax(
             plain + guidance * (plain - F.log_softmax(u_logits, dim=-1)), dim=-1
         )
-        if bool((guidance != 0).all()):
+        if not mixed:
             return guided
         # Mixed batch: positions at guidance 0 keep the singly-normalised form.
         return torch.where(guidance != 0, guided, plain)
 
-    def _pick(self, log_probs, temperature, request_ids, seq_lens, iterations):
+    def _pick(self, log_probs, request_ids, seq_lens, iterations):
         """Greedy where temperature is 0, Gumbel over the top slice elsewhere.
 
         The top slice is taken per request too, at that request's own
@@ -224,7 +224,7 @@ class DiffusionSamplerResource(Resource):
     def _config(self, rid: str) -> DiffusionSamplingReqConfig:
         return self._configs.get(rid) or DiffusionSamplingReqConfig()
 
-    def _generator(self, seed: int, iteration: int) -> torch.Generator | None:
+    def _generator(self, seed: int | None, iteration: int) -> torch.Generator | None:
         """This request's stream for this iteration, or None when unseeded.
 
         Mixing the iteration in rather than advancing one long-lived stream:
@@ -232,7 +232,7 @@ class DiffusionSamplerResource(Resource):
         relative to anyone else's, so a stream that depended on call order
         would not replay.
         """
-        if not seed:
+        if seed is None:
             return None
         generator = torch.Generator(device=self._device)
         generator.manual_seed((int(seed) * 1_000_003 + int(iteration)) & 0x7FFF_FFFF_FFFF_FFFF)

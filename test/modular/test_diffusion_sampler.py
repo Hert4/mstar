@@ -124,9 +124,26 @@ def test_a_seeded_request_replays():
         return res.sample(["a"], c, seq_lens=[7], iterations=[iteration])[0]
 
     assert torch.equal(draw(1234), draw(1234))
+    assert torch.equal(draw(0), draw(0)), "seed 0 is a seed, not 'unseeded'"
     assert not torch.equal(draw(1234), draw(5678))
     # Different iterations of the same request must not repeat one draw.
     assert not torch.equal(draw(1234, iteration=0), draw(1234, iteration=1))
+
+
+def test_a_sampled_position_still_scores_its_max():
+    """The reveal ranks on the max log-prob, as the reference does, not on the
+    log-prob of whichever token the Gumbel draw picked."""
+    res = _build()
+    cfg = DiffusionSamplingReqConfig(temperature=5.0, top_ratio=1.0)
+    cfg.apply_conductor_config(seed=3)
+    res.ingest_request("a", cfg)
+    c = _logits(40, seed=8)
+
+    tokens, logprobs = res.sample(["a"], c, seq_lens=[40])
+    expect = torch.log_softmax(c, dim=-1)
+    expect[..., MASK] = -float("inf")
+    assert not torch.equal(tokens, expect.argmax(-1)), "the draw should leave the argmax somewhere"
+    assert torch.equal(logprobs, expect.max(-1).values)
 
 
 def test_mismatched_shapes_are_rejected_at_the_seam():

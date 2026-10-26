@@ -56,13 +56,14 @@ class DiffusionSamplingReqConfig(ResourceReqConfig):
     # Fraction of the vocabulary kept before the Gumbel draw. Only read when
     # temperature is above 0.
     top_ratio: float = 0.1
-    _seed: int = 0  # set by the conductor
+    # Set by the conductor. None, not 0, means unseeded: 0 is a valid seed.
+    _seed: int | None = None
 
-    def apply_conductor_config(self, seed: int = 0, **kwargs):
+    def apply_conductor_config(self, seed: int | None = None, **kwargs):
         self._seed = seed
 
     @property
-    def seed(self) -> int:
+    def seed(self) -> int | None:
         return self._seed
 
 

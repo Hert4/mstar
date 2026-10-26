@@ -195,6 +195,24 @@ def test_reveal_schedule_covers_the_canvas():
             assert sum(schedule) == target_len * NUM_CODEBOOK
 
 
+def test_seeded_reveal_order_replays():
+    """Same seed, same cells revealed; different seed, different cells."""
+    g = torch.Generator().manual_seed(0)
+    pred = torch.randint(0, MASK_ID, (1, NUM_CODEBOOK, 12), generator=g)
+    scores = torch.randn(1, NUM_CODEBOOK, 12, generator=g)
+
+    def reveal(seed):
+        return apply_reveal(
+            tokens=torch.full((1, NUM_CODEBOOK, 12), MASK_ID, dtype=torch.long),
+            pred_tokens=pred, scores=scores, reveal_count=20, audio_mask_id=MASK_ID,
+            layer_penalty_factor=0.1, position_temperature=5.0,
+            generator=torch.Generator().manual_seed(seed),
+        )
+
+    assert torch.equal(reveal(1234), reveal(1234))
+    assert not torch.equal(reveal(1234), reveal(5678))
+
+
 
 
 # ---------------------------------------------------------------------------
