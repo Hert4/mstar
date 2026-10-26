@@ -1,0 +1,30 @@
+mstar/engine/resources/diffusion_sampler/resource.py
+  s_1cb8bf8bc11a64::t_6d097bf7ba4332 99-102
+  s_1cb8bf8bc11a64::t_101e9045c86486 168-172,178,183
+  s_1cb8bf8bc11a64::t_4e17e27babfd4b 131-137,142-145,149-155,157,160
+  s_1cb8bf8bc11a64::t_60bb70a31a91f8 11-13,227,235
+docs/adding_models.rst
+  s_1cb8bf8bc11a64::t_9b623cfa69b686 568-577
+test/omnivoice/test_omnivoice_parity.py
+  s_1cb8bf8bc11a64::t_e7ab3239cf0a55 198-215
+mstar/engine/resources/diffusion_sampler/config.py
+  s_1cb8bf8bc11a64::t_41db68690ffd0f 59-60,62,66
+test/modular/test_diffusion_sampler.py
+  s_1cb8bf8bc11a64::t_e2dae2fd299280 127,133-148
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "b66abe21030a48c81cfc27f21aa16f76ad1d4d85",
+  "prompts": {},
+  "sessions": {
+    "s_1cb8bf8bc11a64": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0bf9d4de-c626-41d1-bdfe-b71722967075",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "tmduc3 <tmduc3@rd.misa.com.vn>"
+    }
+  }
+}
